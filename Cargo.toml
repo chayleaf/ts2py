@@ -1,0 +1,16 @@
+[package]
+name = "ts2py"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+swc_common = { version = "0.33.26", features = ["tty-emitter"] }
+swc_ecma_ast = "0.113.4"
+swc_ecma_parser = "0.144.1"
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff.git" }
+ruff_python_codegen = { git = "https://github.com/astral-sh/ruff.git" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff.git" }
+ruff_source_file = { git = "https://github.com/astral-sh/ruff.git" }
