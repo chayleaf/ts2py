@@ -68,6 +68,15 @@ impl<T: Convert> Convert for Box<T> {
     }
 }
 
+fn safe_block(mut stmts: Vec<py::Stmt>) -> Vec<py::Stmt> {
+    if stmts.is_empty() {
+        stmts.push(py::Stmt::Pass(py::StmtPass {
+            range: TextRange::default(),
+        }));
+    }
+    stmts
+}
+
 impl Convert for js::Module {
     type Py = py::ModModule;
     fn convert(self, state: &State) -> Self::Py {
@@ -732,7 +741,7 @@ fn convert_func(
             }),
             body: {
                 body_stmts.extend(body.convert(state).unwrap_or_default());
-                body_stmts
+                safe_block(body_stmts)
             },
             decorator_list: decorators
                 .convert(state)
@@ -824,7 +833,7 @@ impl Convert for js::ArrowExpr {
                 range: span.convert(state),
                 name: state.gen_ident(),
                 parameters: Box::new(parameters),
-                body: body_stmts,
+                body: safe_block(body_stmts),
                 decorator_list: vec![],
                 returns: None,
                 type_params: type_params
@@ -1334,11 +1343,11 @@ impl Convert for js::CondExpr {
         stmts.push(py::Stmt::If(py::StmtIf {
             range: TextRange::default(),
             test: Box::new(test),
-            body: stmts2,
+            body: safe_block(stmts2),
             elif_else_clauses: vec![py::ElifElseClause {
                 range: TextRange::default(),
                 test: None,
-                body: stmts3,
+                body: safe_block(stmts3),
             }],
         }));
         WithStmts {
@@ -2279,44 +2288,46 @@ impl Convert for js::TsEnumDecl {
                     ctx: py::ExprContext::Load,
                 })]),
             })),
-            body: members
-                .into_iter()
-                .map(|x| {
-                    let js::TsEnumMember { span, id, init } = x;
-                    let init = init
-                        .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
-                        .unwrap_or_else(|| match &last_val {
-                            Some(py::Expr::NumberLiteral(py::ExprNumberLiteral {
-                                value: py::Number::Int(x),
-                                range,
-                            })) => py::Expr::NumberLiteral(py::ExprNumberLiteral {
-                                value: py::Number::Int(
-                                    (x.to_string().parse::<u64>().unwrap() + 1)
-                                        .to_string()
-                                        .parse()
-                                        .unwrap(),
-                                ),
-                                range: *range,
-                            }),
-                            None => py::Expr::NumberLiteral(py::ExprNumberLiteral {
-                                value: py::Number::Int(py::Int::ZERO),
-                                range: TextRange::default(),
-                            }),
-                            x => todo!("{x:?}"),
-                        });
-                    last_val = Some(init.clone());
-                    let id = id.convert(state);
-                    py::Stmt::Assign(py::StmtAssign {
-                        range: span.convert(state),
-                        targets: vec![py::Expr::Name(py::ExprName {
-                            range: id.range,
-                            id: id.id,
-                            ctx: py::ExprContext::Store,
-                        })],
-                        value: Box::new(init),
+            body: safe_block(
+                members
+                    .into_iter()
+                    .map(|x| {
+                        let js::TsEnumMember { span, id, init } = x;
+                        let init = init
+                            .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
+                            .unwrap_or_else(|| match &last_val {
+                                Some(py::Expr::NumberLiteral(py::ExprNumberLiteral {
+                                    value: py::Number::Int(x),
+                                    range,
+                                })) => py::Expr::NumberLiteral(py::ExprNumberLiteral {
+                                    value: py::Number::Int(
+                                        (x.to_string().parse::<u64>().unwrap() + 1)
+                                            .to_string()
+                                            .parse()
+                                            .unwrap(),
+                                    ),
+                                    range: *range,
+                                }),
+                                None => py::Expr::NumberLiteral(py::ExprNumberLiteral {
+                                    value: py::Number::Int(py::Int::ZERO),
+                                    range: TextRange::default(),
+                                }),
+                                x => todo!("{x:?}"),
+                            });
+                        last_val = Some(init.clone());
+                        let id = id.convert(state);
+                        py::Stmt::Assign(py::StmtAssign {
+                            range: span.convert(state),
+                            targets: vec![py::Expr::Name(py::ExprName {
+                                range: id.range,
+                                id: id.id,
+                                ctx: py::ExprContext::Store,
+                            })],
+                            value: Box::new(init),
+                        })
                     })
-                })
-                .collect(),
+                    .collect(),
+            ),
         });
         stmts.push(ret);
         stmts
@@ -2358,7 +2369,7 @@ impl Convert for js::TsInterfaceDecl {
             })),
             type_params: type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
             name: id.convert(state),
-            body: body.convert(state).unwrap_into(&mut stmts),
+            body: safe_block(body.convert(state).unwrap_into(&mut stmts)),
         };
         stmts.push(py::Stmt::ClassDef(ret));
         stmts
@@ -2453,10 +2464,11 @@ impl Convert for js::ClassDecl {
             })),
             type_params: type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
             name: ident.convert(state),
-            body: body
-                .into_iter()
-                .map(|x| x.convert(state).unwrap_into(&mut stmts))
-                .collect(),
+            body: safe_block(
+                body.into_iter()
+                    .map(|x| x.convert(state).unwrap_into(&mut stmts))
+                    .collect(),
+            ),
         };
         stmts.push(py::Stmt::ClassDef(ret));
         stmts
@@ -2514,7 +2526,7 @@ impl Convert for js::Constructor {
                 }),
                 body: {
                     body_stmts.extend(body.unwrap().convert(state));
-                    body_stmts
+                    safe_block(body_stmts)
                 },
                 returns: None,
                 type_params: None,
@@ -2684,10 +2696,12 @@ impl Convert for js::TsTypeLit {
             })),
             type_params: None,
             name: state.gen_ident(),
-            body: members
-                .into_iter()
-                .map(|x| x.convert(state).unwrap_into(&mut stmts))
-                .collect(),
+            body: safe_block(
+                members
+                    .into_iter()
+                    .map(|x| x.convert(state).unwrap_into(&mut stmts))
+                    .collect(),
+            ),
         };
         stmts.push(py::Stmt::ClassDef(ret));
         stmts
@@ -2727,10 +2741,12 @@ impl Convert for js::TsTypeAliasDecl {
                     type_params: type_params
                         .map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
                     name: id.convert(state),
-                    body: members
-                        .into_iter()
-                        .map(|x| x.convert(state).unwrap_into(&mut stmts))
-                        .collect(),
+                    body: safe_block(
+                        members
+                            .into_iter()
+                            .map(|x| x.convert(state).unwrap_into(&mut stmts))
+                            .collect(),
+                    ),
                 });
                 stmts.push(ret);
                 stmts
@@ -3089,7 +3105,7 @@ impl Convert for js::TryStmt {
         let mut stmts = vec![];
         let ret = py::Stmt::Try(py::StmtTry {
             range: span.convert(state),
-            body: block.convert(state),
+            body: safe_block(block.convert(state)),
             handlers: handler
                 .into_iter()
                 .map(|x| x.convert(state).unwrap_into(&mut stmts))
@@ -3124,7 +3140,7 @@ impl Convert for js::CatchClause {
                         })
                     }))),
                     name: Some(name),
-                    body: body_stmts,
+                    body: safe_block(body_stmts),
                 })
             } else {
                 py::ExceptHandler::ExceptHandler(py::ExceptHandlerExceptHandler {
@@ -3408,7 +3424,7 @@ impl Convert for js::SwitchStmt {
                 left: Box::new(var.clone()),
                 comparators: Box::new([test]),
             })),
-            body: cons.collect(),
+            body: safe_block(cons.collect()),
             elif_else_clauses: cases
                 .map(|case| {
                     let js::SwitchCase { span, test, cons } = case;
@@ -3430,7 +3446,7 @@ impl Convert for js::SwitchStmt {
                                 comparators: Box::new([test]),
                             })
                         }),
-                        body: cons.collect(),
+                        body: safe_block(cons.collect()),
                     }
                 })
                 .collect(),
@@ -3470,18 +3486,44 @@ impl Convert for js::IfStmt {
             alt,
         } = self;
         let WithStmts { expr, mut stmts } = (*test).convert(state);
+        let mut elif_clauses = vec![];
+        if let Some(alt) = alt {
+            elif_clauses.push(py::ElifElseClause {
+                range: alt.span().convert(state),
+                test: None,
+                body: safe_block((*alt).convert(state)),
+            });
+        }
+        loop {
+            let clause = match elif_clauses.pop() {
+                Some(x) if x.body.len() == 1 && x.body[0].is_if_stmt() && x.test.is_none() => x,
+                Some(x) => {
+                    elif_clauses.push(x);
+                    break;
+                }
+                None => break,
+            };
+            let Some(py::Stmt::If(py::StmtIf {
+                range,
+                test,
+                body,
+                elif_else_clauses,
+            })) = clause.body.into_iter().next()
+            else {
+                todo!()
+            };
+            elif_clauses.push(py::ElifElseClause {
+                range,
+                test: Some(*test),
+                body,
+            });
+            elif_clauses.extend(elif_else_clauses);
+        }
         stmts.push(py::Stmt::If(py::StmtIf {
             range: span.convert(state),
             test: Box::new(expr),
-            body: (*cons).convert(state),
-            elif_else_clauses: alt
-                .into_iter()
-                .map(|x| py::ElifElseClause {
-                    range: x.span().convert(state),
-                    test: None,
-                    body: (*x).convert(state),
-                })
-                .collect(),
+            body: safe_block((*cons).convert(state)),
+            elif_else_clauses: elif_clauses,
         }));
         stmts
     }
