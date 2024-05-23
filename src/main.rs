@@ -112,6 +112,9 @@ impl Convert for js::ImportDecl {
             .trim_end_matches(".js")
             .trim_end_matches(".ts")
             .replace('-', "_")
+            .replace('@', "")
+            .replace("../", "")
+            .replace("./", "/")
             .replace('/', ".");
         specifiers
             .into_iter()
@@ -177,6 +180,9 @@ impl Convert for js::ExportAll {
             .trim_end_matches(".js")
             .trim_end_matches(".ts")
             .replace('-', "_")
+            .replace('@', "")
+            .replace("../", "")
+            .replace("./", "/")
             .replace('/', ".");
         py::StmtImportFrom {
             range: span.convert(state),
