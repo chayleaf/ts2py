@@ -2434,17 +2434,7 @@ impl Convert for js::ClassDecl {
                 args: {
                     let mut args = super_class
                         .map(|x| vec![(*x).convert(state).unwrap_into(&mut stmts)])
-                        .unwrap_or_else(|| {
-                            vec![py::Expr::Attribute(py::ExprAttribute {
-                                range: span.convert(state),
-                                value: Box::new(state.import("typing")),
-                                attr: py::Identifier {
-                                    range: TextRange::default(),
-                                    id: "TypedDict".to_owned(),
-                                },
-                                ctx: py::ExprContext::Load,
-                            })]
-                        });
+                        .unwrap_or_default();
                     args.extend(
                         implements
                             .into_iter()
@@ -2661,19 +2651,7 @@ impl Convert for js::TsTypeLit {
         let ret = py::StmtClassDef {
             range: span.convert(state),
             decorator_list: vec![],
-            arguments: Some(Box::new(py::Arguments {
-                range: TextRange::default(),
-                keywords: Box::new([]),
-                args: Box::new([py::Expr::Attribute(py::ExprAttribute {
-                    range: span.convert(state),
-                    value: Box::new(state.import("typing")),
-                    attr: py::Identifier {
-                        range: TextRange::default(),
-                        id: "TypedDict".to_owned(),
-                    },
-                    ctx: py::ExprContext::Load,
-                })]),
-            })),
+            arguments: None,
             type_params: None,
             name: state.gen_ident(),
             body: members
@@ -2703,19 +2681,7 @@ impl Convert for js::TsTypeAliasDecl {
                 let ret = py::Stmt::ClassDef(py::StmtClassDef {
                     range: span.convert(state),
                     decorator_list: vec![],
-                    arguments: Some(Box::new(py::Arguments {
-                        range: TextRange::default(),
-                        keywords: Box::new([]),
-                        args: Box::new([py::Expr::Attribute(py::ExprAttribute {
-                            range: span.convert(state),
-                            value: Box::new(state.import("typing")),
-                            attr: py::Identifier {
-                                range: TextRange::default(),
-                                id: "TypedDict".to_owned(),
-                            },
-                            ctx: py::ExprContext::Load,
-                        })]),
-                    })),
+                    arguments: None,
                     type_params: type_params
                         .map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
                     name: id.convert(state),
