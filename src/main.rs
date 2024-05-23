@@ -75,21 +75,23 @@ impl Convert for js::Module {
             range: self.span.convert(state),
             body: self.body.convert(state).into_iter().flatten().collect(),
         };
-        ret.body.insert(
-            0,
-            py::Stmt::Import(py::StmtImport {
-                range: TextRange::default(),
-                names: state
-                    .1
-                    .iter()
-                    .map(|x| py::Alias {
-                        range: TextRange::default(),
-                        name: py::Identifier::new(x.as_str(), TextRange::default()),
-                        asname: None,
-                    })
-                    .collect(),
-            }),
-        );
+        if !state.1.is_empty() {
+            ret.body.insert(
+                0,
+                py::Stmt::Import(py::StmtImport {
+                    range: TextRange::default(),
+                    names: state
+                        .1
+                        .iter()
+                        .map(|x| py::Alias {
+                            range: TextRange::default(),
+                            name: py::Identifier::new(x.as_str(), TextRange::default()),
+                            asname: None,
+                        })
+                        .collect(),
+                }),
+            );
+        }
         ret
     }
 }
@@ -3408,7 +3410,14 @@ impl Convert for js::SwitchStmt {
                     });
                     py::ElifElseClause {
                         range: span.convert(state),
-                        test,
+                        test: test.map(|test| {
+                            py::Expr::Compare(py::ExprCompare {
+                                range: span2.convert(state),
+                                ops: Box::new([py::CmpOp::Eq]),
+                                left: Box::new(var.clone()),
+                                comparators: Box::new([test]),
+                            })
+                        }),
                         body: cons.collect(),
                     }
                 })
