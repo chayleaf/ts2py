@@ -2661,7 +2661,19 @@ impl Convert for js::TsTypeLit {
         let ret = py::StmtClassDef {
             range: span.convert(state),
             decorator_list: vec![],
-            arguments: None,
+            arguments: Some(Box::new(py::Arguments {
+                range: TextRange::default(),
+                keywords: Box::new([]),
+                args: Box::new([py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(state.import("typing")),
+                    attr: py::Identifier {
+                        range: TextRange::default(),
+                        id: "TypedDict".to_owned(),
+                    },
+                    ctx: py::ExprContext::Load,
+                })]),
+            })),
             type_params: None,
             name: state.gen_ident(),
             body: members
@@ -2691,7 +2703,19 @@ impl Convert for js::TsTypeAliasDecl {
                 let ret = py::Stmt::ClassDef(py::StmtClassDef {
                     range: span.convert(state),
                     decorator_list: vec![],
-                    arguments: None,
+                    arguments: Some(Box::new(py::Arguments {
+                        range: TextRange::default(),
+                        keywords: Box::new([]),
+                        args: Box::new([py::Expr::Attribute(py::ExprAttribute {
+                            range: span.convert(state),
+                            value: Box::new(state.import("typing")),
+                            attr: py::Identifier {
+                                range: TextRange::default(),
+                                id: "TypedDict".to_owned(),
+                            },
+                            ctx: py::ExprContext::Load,
+                        })]),
+                    })),
                     type_params: type_params
                         .map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
                     name: id.convert(state),
