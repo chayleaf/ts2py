@@ -2534,7 +2534,17 @@ impl Convert for js::ClassProp {
             definite: _,
         } = self;
         let mut stmts = vec![];
-        let target = key.convert(state).unwrap_into(&mut stmts);
+        let target = match key {
+            js::PropName::Ident(x) => {
+                let id = x.convert(state);
+                py::Expr::Name(py::ExprName {
+                    range: id.range,
+                    id: id.id,
+                    ctx: py::ExprContext::Store,
+                })
+            }
+            key => key.convert(state).unwrap_into(&mut stmts),
+        };
         let val = value.map(|x| (*x).convert(state).unwrap_into(&mut stmts));
         let type_ann = type_ann.map(|type_ann| {
             let mut ann = (*type_ann).convert(state).unwrap_into(&mut stmts);
