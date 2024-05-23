@@ -3116,7 +3116,13 @@ impl Convert for js::CatchClause {
                 body_stmts.extend(body);
                 py::ExceptHandler::ExceptHandler(py::ExceptHandlerExceptHandler {
                     range: span.convert(state),
-                    type_: typ.map(Box::new),
+                    type_: Some(Box::new(typ.unwrap_or_else(|| {
+                        py::Expr::Name(py::ExprName {
+                            range: TextRange::default(),
+                            id: "Exception".to_owned(),
+                            ctx: py::ExprContext::Load,
+                        })
+                    }))),
                     name: Some(name),
                     body: body_stmts,
                 })
