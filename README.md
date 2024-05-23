@@ -7,4 +7,5 @@ it using [Ruff](https://github.com/astral-sh/ruff).
 
 ## Usage
 
-Change the file path in main.rs and run using `cargo run`.
+The program will look at the directory `./a`, convert all .js/.ts
+files into .py files and put them to the `./b` directory.
