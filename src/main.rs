@@ -1,5 +1,9 @@
-#![allow(clippy::match_single_binding)]
+#![allow(
+    clippy::match_single_binding,
+    clippy::match_wildcard_for_single_variants
+)]
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -503,7 +507,7 @@ impl Default for PatPy<py::Identifier> {
     fn default() -> Self {
         Self {
             id: py::Identifier {
-                id: "".to_owned(),
+                id: String::new(),
                 range: TextRange::default(),
             },
             type_ann: None,
@@ -518,7 +522,7 @@ impl Default for PatPy<py::Expr> {
         Self {
             id: py::Expr::Name(py::ExprName {
                 range: TextRange::default(),
-                id: "".to_owned(),
+                id: String::new(),
                 ctx: py::ExprContext::Load,
             }),
             type_ann: None,
@@ -605,28 +609,31 @@ impl Convert for js::ArrayPat {
             elts: elems
                 .into_iter()
                 .map(|x| {
-                    if let Some(x) = x {
-                        // don't unwrap into stmts because it only contains type-related stmts, and type ann is
-                        // ignored here
-                        let PatPy {
-                            id: x,
-                            type_ann: _,
-                            body_stmts: stmts2,
-                            def_val: _,
-                        } = x.convert(state).expr;
-                        body_stmts.extend(stmts2);
-                        py::Expr::Name(py::ExprName {
-                            range: x.range,
-                            id: safe_name(&x.id),
-                            ctx: py::ExprContext::Store,
-                        })
-                    } else {
-                        py::Expr::Name(py::ExprName {
-                            range: TextRange::default(),
-                            id: "_".to_owned(),
-                            ctx: py::ExprContext::Store,
-                        })
-                    }
+                    x.map_or_else(
+                        || {
+                            py::Expr::Name(py::ExprName {
+                                range: TextRange::default(),
+                                id: "_".to_owned(),
+                                ctx: py::ExprContext::Store,
+                            })
+                        },
+                        |x| {
+                            // don't unwrap into stmts because it only contains type-related stmts, and type ann is
+                            // ignored here
+                            let PatPy {
+                                id: x,
+                                type_ann: _,
+                                body_stmts: stmts2,
+                                def_val: _,
+                            } = x.convert(state).expr;
+                            body_stmts.extend(stmts2);
+                            py::Expr::Name(py::ExprName {
+                                range: x.range,
+                                id: safe_name(&x.id),
+                                ctx: py::ExprContext::Store,
+                            })
+                        },
+                    )
                 })
                 .collect(),
         });
@@ -652,8 +659,8 @@ impl Convert for js::Callee {
     type Py = HopefullyExpr;
     fn convert(self, state: &State) -> Self::Py {
         match self {
-            js::Callee::Expr(x) => (*x).convert(state),
-            js::Callee::Super(x) => x.convert(state).into(),
+            Self::Expr(x) => (*x).convert(state),
+            Self::Super(x) => x.convert(state).into(),
             x => todo!("{x:?}"),
         }
     }
@@ -685,7 +692,7 @@ impl Convert for js::Super {
 impl Convert for js::CallExpr {
     type Py = WithStmts<py::ExprCall>;
     fn convert(self, state: &State) -> Self::Py {
-        let js::CallExpr {
+        let Self {
             span,
             callee,
             args,
@@ -709,7 +716,7 @@ impl Convert for js::CallExpr {
 impl Convert for js::NewExpr {
     type Py = WithStmts<py::ExprCall>;
     fn convert(self, state: &State) -> Self::Py {
-        let js::NewExpr {
+        let Self {
             span,
             callee,
             args,
@@ -735,7 +742,7 @@ impl Convert for js::Lit {
     type Py = py::Expr;
     fn convert2(self, state: &State, _ctx: py::ExprContext) -> Self::Py {
         match self {
-            js::Lit::Str(js::Str {
+            Self::Str(js::Str {
                 span,
                 value,
                 raw: _,
@@ -747,14 +754,14 @@ impl Convert for js::Lit {
                     flags: py::StringLiteralFlags::default(),
                 }),
             }),
-            js::Lit::Num(num) => py::Expr::NumberLiteral(py::ExprNumberLiteral {
+            Self::Num(num) => py::Expr::NumberLiteral(py::ExprNumberLiteral {
                 range: num.span.convert(state),
                 value: num.convert(state),
             }),
-            js::Lit::Null(js::Null { span }) => py::Expr::NoneLiteral(py::ExprNoneLiteral {
+            Self::Null(js::Null { span }) => py::Expr::NoneLiteral(py::ExprNoneLiteral {
                 range: span.convert(state),
             }),
-            js::Lit::Bool(js::Bool { span, value }) => {
+            Self::Bool(js::Bool { span, value }) => {
                 py::Expr::BooleanLiteral(py::ExprBooleanLiteral {
                     range: span.convert(state),
                     value,
@@ -767,7 +774,7 @@ impl Convert for js::Lit {
 impl Convert for js::ArrayLit {
     type Py = WithStmts<py::ExprList>;
     fn convert2(self, state: &State, ctx: py::ExprContext) -> Self::Py {
-        let js::ArrayLit { span, elems } = self;
+        let Self { span, elems } = self;
         let mut stmts = Vec::new();
         let expr = py::ExprList {
             range: span.convert(state),
@@ -807,9 +814,7 @@ fn convert_func(
         expr: py::StmtFunctionDef {
             is_async,
             range: span.convert(state),
-            name: ident
-                .map(|x| x.convert(state))
-                .unwrap_or_else(|| state.gen_ident()),
+            name: ident.map_or_else(|| state.gen_ident(), |x| x.convert(state)),
             parameters: Box::new(safe_params(py::Parameters {
                 range: TextRange::default(),
                 args: params
@@ -1124,8 +1129,8 @@ impl Convert for js::Expr {
     type Py = HopefullyExpr;
     fn convert2(self, state: &State, ctx: py::ExprContext) -> Self::Py {
         match self {
-            js::Expr::Call(expr) => expr.convert2(state, ctx).map1(py::Expr::Call),
-            js::Expr::Ident(js::Ident {
+            Self::Call(expr) => expr.convert2(state, ctx).map1(py::Expr::Call),
+            Self::Ident(js::Ident {
                 sym,
                 span,
                 optional: _,
@@ -1141,31 +1146,31 @@ impl Convert for js::Expr {
                 })
             }
             .into(),
-            js::Expr::Lit(lit) => lit.convert2(state, ctx).into(),
-            js::Expr::Array(lit) => lit.convert2(state, ctx).map1(py::Expr::List),
-            js::Expr::Fn(expr) => {
+            Self::Lit(lit) => lit.convert2(state, ctx).into(),
+            Self::Array(lit) => lit.convert2(state, ctx).map1(py::Expr::List),
+            Self::Fn(expr) => {
                 let WithStmts { expr, mut stmts } = expr.convert2(state, ctx);
                 stmts.push(py::Stmt::FunctionDef(expr));
                 stmts.into()
             }
-            js::Expr::New(expr) => expr.convert2(state, ctx).map1(py::Expr::Call),
-            js::Expr::Arrow(expr) => expr.convert2(state, ctx),
-            js::Expr::Await(expr) => expr.convert2(state, ctx).map1(py::Expr::Await),
-            js::Expr::Member(expr) => expr.convert2(state, ctx),
-            js::Expr::Bin(expr) => expr.convert2(state, ctx),
-            js::Expr::Unary(expr) => expr.convert2(state, ctx),
-            js::Expr::Paren(js::ParenExpr { span: _, expr }) => (*expr).convert2(state, ctx),
-            js::Expr::Object(lit) => lit.convert2(state, ctx).map1(py::Expr::Dict),
-            js::Expr::Tpl(tpl) => tpl.convert2(state, ctx).map1(py::Expr::FString),
-            js::Expr::Assign(expr) => expr.convert2(state, ctx),
-            js::Expr::Cond(expr) => expr.convert2(state, ctx),
-            js::Expr::TsAs(expr) => expr.convert2(state, ctx),
-            js::Expr::This(expr) => expr.convert2(state, ctx).into(),
-            js::Expr::TsNonNull(expr) => expr.convert2(state, ctx),
-            js::Expr::OptChain(expr) => expr.convert2(state, ctx),
-            js::Expr::Update(expr) => expr.convert2(state, ctx),
-            js::Expr::SuperProp(expr) => expr.convert2(state, ctx),
-            js::Expr::TaggedTpl(expr) => expr.convert2(state, ctx).map1(py::Expr::FString),
+            Self::New(expr) => expr.convert2(state, ctx).map1(py::Expr::Call),
+            Self::Arrow(expr) => expr.convert2(state, ctx),
+            Self::Await(expr) => expr.convert2(state, ctx).map1(py::Expr::Await),
+            Self::Member(expr) => expr.convert2(state, ctx),
+            Self::Bin(expr) => expr.convert2(state, ctx),
+            Self::Unary(expr) => expr.convert2(state, ctx),
+            Self::Paren(js::ParenExpr { span: _, expr }) => (*expr).convert2(state, ctx),
+            Self::Object(lit) => lit.convert2(state, ctx).map1(py::Expr::Dict),
+            Self::Tpl(tpl) => tpl.convert2(state, ctx).map1(py::Expr::FString),
+            Self::Assign(expr) => expr.convert2(state, ctx),
+            Self::Cond(expr) => expr.convert2(state, ctx),
+            Self::TsAs(expr) => expr.convert2(state, ctx),
+            Self::This(expr) => expr.convert2(state, ctx).into(),
+            Self::TsNonNull(expr) => expr.convert2(state, ctx),
+            Self::OptChain(expr) => expr.convert2(state, ctx),
+            Self::Update(expr) => expr.convert2(state, ctx),
+            Self::SuperProp(expr) => expr.convert2(state, ctx),
+            Self::TaggedTpl(expr) => expr.convert2(state, ctx).map1(py::Expr::FString),
             x => todo!("{x:?}"),
         }
     }
@@ -1298,7 +1303,7 @@ impl Convert for js::UpdateExpr {
                 WithStmts {
                     expr: py::Expr::Name(py::ExprName {
                         range: TextRange::default(),
-                        id: tmp.clone(),
+                        id: tmp,
                         ctx: py::ExprContext::Load,
                     }),
                     stmts,
@@ -1524,8 +1529,8 @@ impl Convert for js::AssignExpr {
                 {
                     let py::ExprName { range, id, ctx: _ } = target.clone().name_expr().unwrap();
                     match &mut stmts[0] {
-                        py::Stmt::ClassDef(x) => x.name = py::Identifier { range, id },
-                        py::Stmt::FunctionDef(x) => x.name = py::Identifier { range, id },
+                        py::Stmt::ClassDef(x) => x.name = py::Identifier { id, range },
+                        py::Stmt::FunctionDef(x) => x.name = py::Identifier { id, range },
                         x => todo!("{x:?}"),
                     }
                     stmts.extend(stmts2);
@@ -1661,8 +1666,7 @@ impl Convert for js::Tpl {
                             .into_iter()
                             .zip(exprs.into_iter().map(Some).chain([None]))
                             .flat_map(|(q, e)| {
-                                [py::FStringElement::Literal(q.convert(state))]
-                                    .into_iter()
+                                std::iter::once(py::FStringElement::Literal(q.convert(state)))
                                     .chain(e.map(|e| {
                                         py::FStringElement::Expression(
                                             py::FStringExpressionElement {
@@ -1806,10 +1810,10 @@ impl Convert for js::Number {
         } else {
             &s
         };
-        if !s.bytes().all(|x| x.is_ascii_digit()) {
-            py::Number::Float(self.value)
-        } else {
+        if s.bytes().all(|x| x.is_ascii_digit()) {
             py::Number::Int(s.parse().unwrap())
+        } else {
+            py::Number::Float(self.value)
         }
     }
 }
@@ -1954,8 +1958,8 @@ impl Convert for js::TsFnType {
                             elts: params
                                 .into_iter()
                                 .map(|x| match x.convert(state).unwrap_into(&mut stmts) {
-                                    PyParameter::Single(x) => {
-                                        x.parameter.annotation.map(|x| *x).unwrap_or_else(|| {
+                                    PyParameter::Single(x) => x.parameter.annotation.map_or_else(
+                                        || {
                                             py::Expr::Attribute(py::ExprAttribute {
                                                 range: span.convert(state),
                                                 value: Box::new(state.import("typing")),
@@ -1965,8 +1969,9 @@ impl Convert for js::TsFnType {
                                                 },
                                                 ctx: py::ExprContext::Load,
                                             })
-                                        })
-                                    }
+                                        },
+                                        |x| *x,
+                                    ),
                                     PyParameter::Rest(_) => {
                                         py::Expr::EllipsisLiteral(py::ExprEllipsisLiteral {
                                             range: TextRange::default(),
@@ -2389,12 +2394,12 @@ impl Convert for js::Decl {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         match self {
-            js::Decl::Var(d) => (*d).convert(state),
-            js::Decl::TsTypeAlias(d) => (*d).convert(state),
-            js::Decl::Class(d) => d.convert(state),
-            js::Decl::Fn(d) => d.convert(state),
-            js::Decl::TsInterface(d) => (*d).convert(state),
-            js::Decl::TsEnum(d) => (*d).convert(state),
+            Self::Var(d) => (*d).convert(state),
+            Self::TsTypeAlias(d) => (*d).convert(state),
+            Self::Class(d) => d.convert(state),
+            Self::Fn(d) => d.convert(state),
+            Self::TsInterface(d) => (*d).convert(state),
+            Self::TsEnum(d) => (*d).convert(state),
             d => todo!("{d:?}"),
         }
     }
@@ -2435,9 +2440,8 @@ impl Convert for js::TsEnumDecl {
                     .into_iter()
                     .map(|x| {
                         let js::TsEnumMember { span, id, init } = x;
-                        let init = init
-                            .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
-                            .unwrap_or_else(|| match &last_val {
+                        let init = init.map_or_else(
+                            || match &last_val {
                                 Some(py::Expr::NumberLiteral(py::ExprNumberLiteral {
                                     value: py::Number::Int(x),
                                     range,
@@ -2455,7 +2459,9 @@ impl Convert for js::TsEnumDecl {
                                     range: TextRange::default(),
                                 }),
                                 x => todo!("{x:?}"),
-                            });
+                            },
+                            |x| (*x).convert(state).unwrap_into(&mut stmts),
+                        );
                         last_val = Some(init.clone());
                         let id = id.convert(state);
                         py::Stmt::Assign(py::StmtAssign {
@@ -2965,8 +2971,8 @@ impl Convert for js::TsIndexSignature {
                                 .convert(state)
                                 .unwrap_into(&mut stmts)
                             {
-                                PyParameter::Single(x) => {
-                                    x.parameter.annotation.map(|x| *x).unwrap_or_else(|| {
+                                PyParameter::Single(x) => x.parameter.annotation.map_or_else(
+                                    || {
                                         py::Expr::Attribute(py::ExprAttribute {
                                             range: span.convert(state),
                                             value: Box::new(state.import("typing")),
@@ -2976,8 +2982,9 @@ impl Convert for js::TsIndexSignature {
                                             },
                                             ctx: py::ExprContext::Load,
                                         })
-                                    })
-                                }
+                                    },
+                                    |x| *x,
+                                ),
                                 PyParameter::Rest(_) => {
                                     py::Expr::EllipsisLiteral(py::ExprEllipsisLiteral {
                                         range: TextRange::default(),
@@ -3121,9 +3128,8 @@ impl Convert for js::TsPropertySignature {
         assert!(params.is_empty());
         assert!(type_params.is_none());
         let mut stmts = vec![];
-        let mut ann = type_ann
-            .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
-            .unwrap_or_else(|| {
+        let mut ann = type_ann.map_or_else(
+            || {
                 py::Expr::Attribute(py::ExprAttribute {
                     range: span.convert(state),
                     value: Box::new(state.import("typing")),
@@ -3133,7 +3139,9 @@ impl Convert for js::TsPropertySignature {
                     },
                     ctx: py::ExprContext::Load,
                 })
-            });
+            },
+            |x| (*x).convert(state).unwrap_into(&mut stmts),
+        );
         if optional {
             ann = py::Expr::Subscript(py::ExprSubscript {
                 range: TextRange::default(),
@@ -3245,20 +3253,20 @@ impl Convert for js::Stmt {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         match self {
-            js::Stmt::Expr(stmt) => stmt.convert(state),
-            js::Stmt::Decl(decl) => decl.convert(state),
-            js::Stmt::If(stmt) => stmt.convert(state),
-            js::Stmt::Block(stmt) => stmt.convert(state),
-            js::Stmt::Return(stmt) => stmt.convert(state),
-            js::Stmt::Switch(stmt) => stmt.convert(state),
-            js::Stmt::Throw(stmt) => stmt.convert(state),
-            js::Stmt::ForOf(stmt) => stmt.convert(state),
-            js::Stmt::Continue(stmt) => stmt.convert(state),
-            js::Stmt::Try(stmt) => (*stmt).convert(state),
-            js::Stmt::Break(stmt) => stmt.convert(state),
-            js::Stmt::For(stmt) => stmt.convert(state),
-            js::Stmt::While(stmt) => stmt.convert(state),
-            js::Stmt::DoWhile(stmt) => stmt.convert(state),
+            Self::Expr(stmt) => stmt.convert(state),
+            Self::Decl(decl) => decl.convert(state),
+            Self::If(stmt) => stmt.convert(state),
+            Self::Block(stmt) => stmt.convert(state),
+            Self::Return(stmt) => stmt.convert(state),
+            Self::Switch(stmt) => stmt.convert(state),
+            Self::Throw(stmt) => stmt.convert(state),
+            Self::ForOf(stmt) => stmt.convert(state),
+            Self::Continue(stmt) => stmt.convert(state),
+            Self::Try(stmt) => (*stmt).convert(state),
+            Self::Break(stmt) => stmt.convert(state),
+            Self::For(stmt) => stmt.convert(state),
+            Self::While(stmt) => stmt.convert(state),
+            Self::DoWhile(stmt) => stmt.convert(state),
             s => todo!("{s:?}"),
         }
     }
@@ -3374,20 +3382,23 @@ impl Convert for js::ForStmt {
                 body.push(expr_stmt(expr));
             }
         }
-        let test = if let Some(test) = test {
-            let WithStmts {
-                expr: test,
-                stmts: test_stmts,
-            } = (*test).convert(state);
-            stmts.extend(test_stmts.clone());
-            body.extend(test_stmts);
-            test
-        } else {
-            py::Expr::BooleanLiteral(py::ExprBooleanLiteral {
-                range: TextRange::default(),
-                value: true,
-            })
-        };
+        let test = test.map_or_else(
+            || {
+                py::Expr::BooleanLiteral(py::ExprBooleanLiteral {
+                    range: TextRange::default(),
+                    value: true,
+                })
+            },
+            |test| {
+                let WithStmts {
+                    expr: test,
+                    stmts: test_stmts,
+                } = (*test).convert(state);
+                stmts.extend(test_stmts.clone());
+                body.extend(test_stmts);
+                test
+            },
+        );
         stmts.push(py::Stmt::While(py::StmtWhile {
             range: span.convert(state),
             test: Box::new(test),
@@ -3640,19 +3651,22 @@ impl Convert for js::ReturnStmt {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         let Self { span, arg } = self;
-        if let Some(arg) = arg {
-            let WithStmts { expr, mut stmts } = (*arg).convert(state);
-            stmts.push(py::Stmt::Return(py::StmtReturn {
-                range: span.convert(state),
-                value: Some(Box::new(expr)),
-            }));
-            stmts
-        } else {
-            vec![py::Stmt::Return(py::StmtReturn {
-                range: span.convert(state),
-                value: None,
-            })]
-        }
+        arg.map_or_else(
+            || {
+                vec![py::Stmt::Return(py::StmtReturn {
+                    range: span.convert(state),
+                    value: None,
+                })]
+            },
+            |arg| {
+                let WithStmts { expr, mut stmts } = (*arg).convert(state);
+                stmts.push(py::Stmt::Return(py::StmtReturn {
+                    range: span.convert(state),
+                    value: Some(Box::new(expr)),
+                }));
+                stmts
+            },
+        )
     }
 }
 
@@ -3878,7 +3892,7 @@ impl Convert for js::ExprOrSpread {
 }
 
 fn main() {
-    let cm: Lrc<SourceMap> = Default::default();
+    let cm: Lrc<SourceMap> = Lrc::default();
     let handler = Handler::with_tty_emitter(ColorConfig::Auto, true, false, Some(cm.clone()));
 
     for entry in walkdir::WalkDir::new("a") {
@@ -3895,8 +3909,7 @@ fn main() {
             continue;
         };
         let Some(stem) = stem.to_str() else { continue };
-        let Some(ext) = ext.to_str() else { continue };
-        if !matches!(ext.to_lowercase().as_str(), "js" | "ts") {
+        if ext.eq_ignore_ascii_case("ts") | ext.eq_ignore_ascii_case("js") {
             continue;
         }
         if stem.ends_with(".d") {
@@ -3939,7 +3952,7 @@ fn main() {
             .parse_module()
             .map_err(|e| {
                 // Unrecoverable fatal error occurred
-                e.into_diagnostic(&handler).emit()
+                e.into_diagnostic(&handler).emit();
             })
             .expect("failed to parser module");
         let module = module.convert(&State::default());
@@ -3963,7 +3976,6 @@ fn main() {
             eprintln!("{code}");
             panic!("{err}");
         });
-        use std::io::Write;
         let mut out = fs::File::create(&out_path).unwrap();
         if out.write_all(formatted.as_code().as_bytes()).is_err() {
             drop(out);
