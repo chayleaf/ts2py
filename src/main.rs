@@ -1,4 +1,5 @@
 #![allow(clippy::match_single_binding)]
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -70,11 +71,32 @@ impl<T: Convert> Convert for Box<T> {
 }
 
 fn safe_name(s: &str) -> String {
-    match s {
-        "from" => "from_".to_owned(),
-        "None" => "None_".to_owned(),
-        x => x.to_owned(),
+    let mut s = (if matches!(s.chars().next(), Some(c) if unicode_ident::is_xid_start(c) || !unicode_ident::is_xid_continue(c)) {
+        None
+    } else {
+        Some('_')
+    })
+    .into_iter()
+    .chain(s.chars())
+    .enumerate()
+    .map(|(i, x)| {
+        if if i == 0 { unicode_ident::is_xid_start(x) } else { unicode_ident::is_xid_continue(x) } {
+            x
+        } else {
+            '_'
+        }
+    })
+    .collect::<String>();
+    match s.as_str() {
+        "" | "False" | "await" | "else" | "import" | "pass" | "None" | "break" | "except"
+        | "in" | "raise" | "True" | "class" | "finally" | "is" | "return" | "and" | "continue"
+        | "for" | "lambda" | "try" | "as" | "def" | "from" | "nonlocal" | "while" | "assert"
+        | "del" | "global" | "not" | "with" | "async" | "elif" | "if" | "or" | "yield" => {
+            s.push('_')
+        }
+        _ => {}
     }
+    s
 }
 
 fn safe_block(mut stmts: Vec<py::Stmt>) -> Vec<py::Stmt> {
@@ -140,13 +162,13 @@ impl Convert for js::Module {
             range: self.span.convert(state),
             body: self.body.convert(state).into_iter().flatten().collect(),
         };
-        if !state.1.is_empty() {
+        if !state.py_imports.is_empty() {
             ret.body.insert(
                 0,
                 py::Stmt::Import(py::StmtImport {
                     range: TextRange::default(),
                     names: state
-                        .1
+                        .py_imports
                         .iter()
                         .map(|x| py::Alias {
                             range: TextRange::default(),
@@ -161,15 +183,84 @@ impl Convert for js::Module {
     }
 }
 
-fn cleanup_import(src: &str) -> String {
-    src.trim_end_matches(".js")
-        .trim_end_matches(".ts")
-        .trim_end_matches('/')
-        .replace('-', "_")
-        .replace('@', "")
-        .replace("../", "")
-        .replace("./", "/")
-        .replace('/', ".")
+fn convert_import_path(script_path: &Path, src: &str, flatten_dirs: &HashSet<PathBuf>) -> String {
+    let mut path = script_path.to_owned();
+    path.pop();
+    let src = src
+        .strip_suffix(".ts")
+        .or_else(|| src.strip_suffix(".js"))
+        .unwrap_or(src);
+    for comp in src.split('/') {
+        if comp == ".." {
+            path.pop();
+        } else if comp != "." && !comp.is_empty() {
+            path.push(comp);
+        }
+    }
+    let mut ret = ".".to_owned();
+    let mut path2 = PathBuf::new();
+    if path.ends_with("index") {
+        path.pop();
+    }
+    for comp in path.iter() {
+        path2.push(comp);
+        let comp2 = safe_name(comp.to_str().unwrap());
+        ret.push_str(&comp2);
+        if flatten_dirs.contains(&path2) {
+            ret.push('_');
+        } else {
+            ret.push('.');
+        }
+    }
+    ret.pop();
+    ret
+}
+
+fn cleanup_import(state: &State, src: &str) -> String {
+    if src.starts_with("./") || src.starts_with("../") {
+        let conv1 = convert_import_path(&state.script_path, src, &state.flatten_dirs);
+        let conv2 = convert_import_path(
+            &state.script_path,
+            if state.script_path.ends_with("index.js") || state.script_path.ends_with("index.ts") {
+                "."
+            } else {
+                state
+                    .script_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap()
+            },
+            &state.flatten_dirs,
+        );
+        let conv2 = conv2
+            .split('.')
+            .rev()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(".");
+        let mut ret = conv1.strip_prefix(&conv2).unwrap().to_owned();
+        if ret.is_empty() {
+            ret.push('.');
+        }
+        ret
+    } else {
+        src.trim_end_matches(".js")
+            .trim_end_matches(".ts")
+            .trim_end_matches('/')
+            .split('/')
+            .map(safe_name)
+            .fold(String::new(), |mut a, b| {
+                if !a.is_empty() {
+                    a.push('.');
+                }
+                a.push_str(&b);
+                a
+            })
+    }
 }
 
 impl Convert for js::ImportDecl {
@@ -183,7 +274,8 @@ impl Convert for js::ImportDecl {
             type_only: _,
             with: _,
         } = self;
-        let src = cleanup_import(src.value.as_str());
+        state.add_import(src.value.as_str());
+        let src = cleanup_import(state, src.value.as_str());
         specifiers
             .into_iter()
             .map(|spec| match spec {
@@ -194,7 +286,7 @@ impl Convert for js::ImportDecl {
                     is_type_only: _,
                 }) => py::Stmt::ImportFrom(py::StmtImportFrom {
                     range: span.convert(state),
-                    module: Some(py::Identifier::new(safe_name(&src), TextRange::default())),
+                    module: Some(py::Identifier::new(&src, TextRange::default())),
                     names: vec![py::Alias {
                         range: TextRange::default(),
                         asname: imported.is_some().then(|| local.clone().convert(state)),
@@ -218,7 +310,7 @@ impl Convert for js::ImportDecl {
                 }),
                 js::ImportSpecifier::Default(x) => py::Stmt::ImportFrom(py::StmtImportFrom {
                     range: span.convert(state),
-                    module: Some(py::Identifier::new(safe_name(&src), TextRange::default())),
+                    module: Some(py::Identifier::new(&src, TextRange::default())),
                     names: vec![py::Alias {
                         range: TextRange::default(),
                         asname: Some(x.local.convert(state)),
@@ -243,10 +335,11 @@ impl Convert for js::ExportAll {
             type_only: _,
             with: _,
         } = self;
-        let src = cleanup_import(src.value.as_str());
+        state.add_import(src.value.as_str());
+        let src = cleanup_import(state, src.value.as_str());
         py::StmtImportFrom {
             range: span.convert(state),
-            module: Some(py::Identifier::new(safe_name(&src), TextRange::default())),
+            module: Some(py::Identifier::new(src, TextRange::default())),
             names: vec![py::Alias {
                 range: TextRange::default(),
                 asname: None,
@@ -333,22 +426,38 @@ impl<T> From<T> for WithStmts<T> {
     }
 }
 #[derive(Default)]
-struct State(AtomicU32, DashSet<String>);
+struct State {
+    id: AtomicU32,
+    py_imports: DashSet<String>,
+    js_imports: DashSet<String>,
+    script_path: PathBuf,
+    flatten_dirs: HashSet<PathBuf>,
+}
 impl State {
+    fn new(script_path: &Path, flatten_dirs: &HashSet<PathBuf>) -> Self {
+        Self {
+            script_path: script_path.to_owned(),
+            flatten_dirs: flatten_dirs.clone(),
+            ..Default::default()
+        }
+    }
     fn gen_name(&self) -> String {
-        format!("ts2py_{}", self.0.fetch_add(1, Ordering::Relaxed))
+        format!("ts2py_{}", self.id.fetch_add(1, Ordering::Relaxed))
     }
     fn gen_ident(&self) -> py::Identifier {
         py::Identifier::new(self.gen_name(), TextRange::default())
     }
     #[must_use]
     fn import(&self, name: &str) -> py::Expr {
-        self.1.insert(name.to_owned());
+        self.py_imports.insert(name.to_owned());
         py::Expr::Name(py::ExprName {
             range: TextRange::default(),
             id: name.to_owned(),
             ctx: py::ExprContext::Load,
         })
+    }
+    fn add_import(&self, name: &str) {
+        self.js_imports.insert(name.to_owned());
     }
 }
 impl From<py::Stmt> for HopefullyExpr {
@@ -3882,6 +3991,8 @@ fn main() {
     let cm: Lrc<SourceMap> = Lrc::default();
     let handler = Handler::with_tty_emitter(ColorConfig::Auto, true, false, Some(cm.clone()));
 
+    let mut paths = Vec::new();
+
     for entry in walkdir::WalkDir::new("a") {
         let Ok(entry) = entry else { continue };
         let Ok(meta) = entry.metadata() else { continue };
@@ -3896,30 +4007,20 @@ fn main() {
             continue;
         };
         let Some(stem) = stem.to_str() else { continue };
-        if ext.eq_ignore_ascii_case("ts") | ext.eq_ignore_ascii_case("js") {
+        if !ext.eq_ignore_ascii_case("ts") && !ext.eq_ignore_ascii_case("js") {
             continue;
         }
         if stem.ends_with(".d") {
             continue;
         }
-        let mut out_path = PathBuf::new()
-            .join("b")
-            .join(path.strip_prefix("a").unwrap());
-        out_path.pop();
-        out_path.push(stem.to_owned() + ".py");
-        let out_path = PathBuf::from(out_path.to_str().unwrap().replace('-', "_"));
-        if out_path.exists() {
-            continue;
-        }
-        if let Some(parent) = out_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        eprintln!("{path:?} -> {out_path:?}");
-        let fm = cm.load_file(Path::new(path)).expect("failed to load file");
-        /*let fm = cm.new_source_file(
-            FileName::Custom("test.ts".into()),
-            "function foo() {}".into(),
-        );*/
+        paths.push(path.to_owned());
+    }
+
+    let mut flatten_dirs = HashSet::new();
+    for path in &paths {
+        let path2 = path.strip_prefix("a").unwrap();
+        let ext = path.extension().unwrap();
+        let fm = cm.load_file(path).expect("failed to load file");
         let lexer = Lexer::new(
             if ext.eq_ignore_ascii_case("ts") {
                 Syntax::Typescript(Default::default())
@@ -3942,8 +4043,67 @@ fn main() {
             .map_err(|e| {
                 e.into_diagnostic(&handler).emit();
             })
-            .expect("failed to parser module");
-        let module = module.convert(&State::default());
+            .expect("failed to parse module");
+        let state = State::default();
+        let _module = module.convert(&state);
+        for import in state.js_imports.iter() {
+            let mut import = import.as_str();
+            let mut path2 = path2.to_owned();
+            while let Some(x) = import.strip_prefix("../") {
+                path2.pop();
+                flatten_dirs.insert(path2.clone());
+                import = x;
+            }
+        }
+    }
+
+    for _ in 0..5 {
+        println!();
+    }
+
+    for path in paths {
+        let script_path = path.strip_prefix("a").unwrap();
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let stem = if stem == "index" { "" } else { stem };
+        let ext = path.extension().unwrap();
+        let out_path = PathBuf::new().join("b").join(PathBuf::from(
+            convert_import_path(script_path, stem, &flatten_dirs)
+                .trim_start_matches('.')
+                .replace('.', "/")
+                + ".py",
+        ));
+        if out_path.exists() {
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        eprintln!("{path:?} -> {out_path:?}");
+        let fm = cm.load_file(&path).expect("failed to load file");
+        let lexer = Lexer::new(
+            if ext.eq_ignore_ascii_case("ts") {
+                Syntax::Typescript(Default::default())
+            } else {
+                Syntax::Es(Default::default())
+            },
+            EsVersion::EsNext,
+            StringInput::from(&*fm),
+            None,
+        );
+
+        let mut parser = Parser::new_from(lexer);
+
+        for e in parser.take_errors() {
+            e.into_diagnostic(&handler).emit();
+        }
+
+        let module = parser
+            .parse_module()
+            .map_err(|e| {
+                e.into_diagnostic(&handler).emit();
+            })
+            .expect("failed to parse module");
+        let module = module.convert(&State::new(script_path, &flatten_dirs));
         let locator = ruff_source_file::Locator::new("");
         let stylist = ruff_python_codegen::Stylist::from_tokens(&[], &locator);
         let mut code = String::new();

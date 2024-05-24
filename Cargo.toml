@@ -17,3 +17,4 @@ ruff_text_size = { git = "https://github.com/astral-sh/ruff.git" }
 ruff_source_file = { git = "https://github.com/astral-sh/ruff.git" }
 walkdir = "2.5.0"
 dashmap = "5.5.3"
+unicode-ident = "1.0.12"
