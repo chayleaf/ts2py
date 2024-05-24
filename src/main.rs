@@ -1,7 +1,4 @@
-#![allow(
-    clippy::match_single_binding,
-    clippy::match_wildcard_for_single_variants
-)]
+#![allow(clippy::match_single_binding)]
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -164,6 +161,17 @@ impl Convert for js::Module {
     }
 }
 
+fn cleanup_import(src: &str) -> String {
+    src.trim_end_matches(".js")
+        .trim_end_matches(".ts")
+        .trim_end_matches('/')
+        .replace('-', "_")
+        .replace('@', "")
+        .replace("../", "")
+        .replace("./", "/")
+        .replace('/', ".")
+}
+
 impl Convert for js::ImportDecl {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
@@ -175,16 +183,7 @@ impl Convert for js::ImportDecl {
             type_only: _,
             with: _,
         } = self;
-        let src = src.value.as_str();
-        let src = src
-            .trim_end_matches(".js")
-            .trim_end_matches(".ts")
-            .trim_end_matches('/')
-            .replace('-', "_")
-            .replace('@', "")
-            .replace("../", "")
-            .replace("./", "/")
-            .replace('/', ".");
+        let src = cleanup_import(src.value.as_str());
         specifiers
             .into_iter()
             .map(|spec| match spec {
@@ -244,16 +243,7 @@ impl Convert for js::ExportAll {
             type_only: _,
             with: _,
         } = self;
-        let src = src.value.as_str();
-        let src = src
-            .trim_end_matches(".js")
-            .trim_end_matches(".ts")
-            .trim_end_matches('/')
-            .replace('-', "_")
-            .replace('@', "")
-            .replace("../", "")
-            .replace("./", "/")
-            .replace('/', ".");
+        let src = cleanup_import(src.value.as_str());
         py::StmtImportFrom {
             range: span.convert(state),
             module: Some(py::Identifier::new(safe_name(&src), TextRange::default())),
@@ -470,7 +460,7 @@ impl Convert for js::ObjectPat {
                         })
                     });
                 }
-                x => todo!("{x:?}"),
+                js::ObjectPatProp::Rest(x) => todo!("{x:?}"),
             }
         }
         WithStmts {
@@ -661,7 +651,7 @@ impl Convert for js::Callee {
         match self {
             Self::Expr(x) => (*x).convert(state),
             Self::Super(x) => x.convert(state).into(),
-            x => todo!("{x:?}"),
+            Self::Import(x) => todo!("{x:?}"),
         }
     }
 }
@@ -974,7 +964,7 @@ impl Convert for js::MemberExpr {
                     value: Box::new(obj),
                 })
             }
-            x => todo!("{x:?}"),
+            js::MemberProp::PrivateName(x) => todo!("{x:?}"),
         })
     }
 }
@@ -1202,7 +1192,7 @@ impl Convert for js::SuperPropExpr {
                 attr: id.convert(state),
             })
             .into(),
-            x => todo!("{x:?}"),
+            js::SuperProp::Computed(x) => todo!("{x:?}"),
         }
     }
 }
@@ -1383,7 +1373,7 @@ impl Convert for js::OptChainBase {
                                         value: Box::new(obj),
                                     })
                                 }
-                                x => todo!("{x:?}"),
+                                js::MemberProp::PrivateName(x) => todo!("{x:?}"),
                             },
                         ],
                     })
@@ -1911,8 +1901,7 @@ impl Convert for js::TsFnOrConstructorType {
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::TsFnType(x) => x.convert(state),
-            //Self::TsConstructorType(x) => x.convert(state),
-            x => todo!("{x:?}"),
+            Self::TsConstructorType(x) => todo!("{x:?}"),
         }
     }
 }
@@ -2222,30 +2211,28 @@ impl Convert for js::TsIntersectionType {
     fn convert(self, state: &State) -> Self::Py {
         let Self { span, types } = self;
         let mut stmts = vec![];
+        let name = state.gen_ident();
+        let ret = py::Stmt::ClassDef(py::StmtClassDef {
+            range: span.convert(state),
+            decorator_list: vec![],
+            name: name.clone(),
+            type_params: None,
+            arguments: Some(Box::new(py::Arguments {
+                range: TextRange::default(),
+                keywords: Box::new([]),
+                args: types
+                    .into_iter()
+                    .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
+                    .collect(),
+            })),
+            body: safe_block(vec![]),
+        });
+        stmts.push(ret);
         HopefullyExpr {
-            expr: py::Expr::Subscript(py::ExprSubscript {
-                range: span.convert(state),
+            expr: py::Expr::Name(py::ExprName {
+                range: name.range,
+                id: name.id,
                 ctx: py::ExprContext::Load,
-                value: Box::new(py::Expr::Name(py::ExprName {
-                    ctx: py::ExprContext::Load,
-                    range: TextRange::default(),
-                    id: "Intersection".to_owned(),
-                })),
-                slice: Box::new(if types.len() == 1 {
-                    (*types.into_iter().next().unwrap())
-                        .convert(state)
-                        .unwrap_into(&mut stmts)
-                } else {
-                    py::Expr::Tuple(py::ExprTuple {
-                        range: span.convert(state),
-                        ctx: py::ExprContext::Load,
-                        parenthesized: false,
-                        elts: types
-                            .into_iter()
-                            .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
-                            .collect(),
-                    })
-                }),
             }),
             stmts,
         }
@@ -2487,7 +2474,7 @@ impl Convert for js::TsEnumMemberId {
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::Ident(x) => x.convert(state),
-            x => todo!("{x:?}"),
+            Self::Str(x) => todo!("{x:?}"),
         }
     }
 }
