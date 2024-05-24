@@ -12,6 +12,7 @@ swc_ecma_ast = "0.113.4"
 swc_ecma_parser = "0.144.1"
 ruff_python_ast = { git = "https://github.com/astral-sh/ruff.git" }
 ruff_python_codegen = { git = "https://github.com/astral-sh/ruff.git" }
+ruff_python_formatter = { git = "https://github.com/astral-sh/ruff.git" }
 ruff_text_size = { git = "https://github.com/astral-sh/ruff.git" }
 ruff_source_file = { git = "https://github.com/astral-sh/ruff.git" }
 walkdir = "2.5.0"
