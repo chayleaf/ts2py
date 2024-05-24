@@ -1,4 +1,4 @@
-#![allow(unreachable_code, clippy::match_single_binding)]
+#![allow(clippy::match_single_binding)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -3815,9 +3815,6 @@ impl Convert for js::TsParamPropParam {
         }
     }
 }
-/*
-    }
-}*/
 
 impl Convert for js::TsTypeParamDecl {
     type Py = WithStmts<py::TypeParams>;
