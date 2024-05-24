@@ -8,4 +8,6 @@ it using [Ruff](https://github.com/astral-sh/ruff).
 ## Usage
 
 The program will look at the directory `./a`, convert all .js/.ts
-files into .py files and put them to the `./b` directory.
+files into .py files and put them to the `./b` directory. Some stuff
+will inevitably break as there are `todo!()`s littered all over the
+code, but you're smart, you'll figure this out, right?

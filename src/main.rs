@@ -3934,9 +3934,11 @@ fn main() {
             "function foo() {}".into(),
         );*/
         let lexer = Lexer::new(
-            // We want to parse ecmascript
-            Syntax::Typescript(Default::default()),
-            // EsVersion defaults to es5
+            if ext.eq_ignore_ascii_case("ts") {
+                Syntax::Typescript(Default::default())
+            } else {
+                Syntax::Es(Default::default())
+            },
             EsVersion::EsNext,
             StringInput::from(&*fm),
             None,
@@ -3951,7 +3953,6 @@ fn main() {
         let module = parser
             .parse_module()
             .map_err(|e| {
-                // Unrecoverable fatal error occurred
                 e.into_diagnostic(&handler).emit();
             })
             .expect("failed to parser module");
