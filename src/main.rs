@@ -3806,7 +3806,7 @@ impl Convert for js::ExprStmt {
     fn convert(self, state: &State) -> Self::Py {
         let Self { span: _, expr } = self;
         let WithStmts { expr, mut stmts } = (*expr).convert(state);
-        if !expr.is_name_expr() && !expr.is_attribute_expr() {
+        if !expr.is_name_expr() && !expr.is_attribute_expr() && !expr.is_subscript_expr() {
             stmts.push(expr_stmt(expr));
         }
         stmts
@@ -5335,7 +5335,7 @@ impl Convert for js::ForStmt {
         if let Some(upd) = update {
             let WithStmts { expr, stmts } = (*upd).convert(state);
             body.extend(stmts);
-            if !expr.is_name_expr() && !expr.is_attribute_expr() {
+            if !expr.is_name_expr() && !expr.is_attribute_expr() && !expr.is_subscript_expr() {
                 body.push(expr_stmt(expr));
             }
         }
@@ -5428,7 +5428,7 @@ impl Convert for js::VarDeclOrExpr {
             Self::VarDecl(x) => (*x).convert(state),
             Self::Expr(x) => {
                 let WithStmts { expr, mut stmts } = (*x).convert(state);
-                if !expr.is_name_expr() && !expr.is_attribute_expr() {
+                if !expr.is_name_expr() && !expr.is_attribute_expr() && !expr.is_subscript_expr() {
                     stmts.push(expr_stmt(expr));
                 }
                 stmts
