@@ -4782,10 +4782,21 @@ impl Convert for js::TsMethodSignature {
                     x => todo!("{x:?}"),
                 },
                 parameters: Box::new(create_params(
-                    params
-                        .convert(state)
-                        .into_iter()
-                        .map(|x| x.unwrap_into(&mut stmts)),
+                    std::iter::once(PyParameter::Single(py::ParameterWithDefault {
+                        range: TextRange::default(),
+                        default: None,
+                        parameter: py::Parameter {
+                            range: TextRange::default(),
+                            name: py::Identifier::new("self", TextRange::default()),
+                            annotation: None,
+                        },
+                    }))
+                    .chain(
+                        params
+                            .convert(state)
+                            .into_iter()
+                            .map(|x| x.unwrap_into(&mut stmts)),
+                    ),
                 )),
                 body: vec![py::Stmt::Raise(py::StmtRaise {
                     range: TextRange::default(),
