@@ -1,5 +1,5 @@
 #![allow(clippy::match_single_binding)]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -206,7 +206,7 @@ fn convert_import_path(script_path: &Path, src: &str, flatten_dirs: &HashSet<Pat
 }
 
 fn cleanup_import(state: &State, src: &str) -> String {
-    if src.starts_with("./") || src.starts_with("../") {
+    if (src.starts_with("./") || src.starts_with("../")) && !src.ends_with(".json") {
         let conv1 = convert_import_path(&state.script_path, src, &state.flatten_dirs);
         let mut parent = state.script_path.clone();
         parent.pop();
@@ -270,6 +270,7 @@ impl Convert for js::ImportDecl {
             with: _,
         } = self;
         state.add_import(src.value.as_str());
+        let src1 = src.value.as_str();
         let src = cleanup_import(state, src.value.as_str());
         specifiers
             .into_iter()
@@ -303,16 +304,154 @@ impl Convert for js::ImportDecl {
                     }],
                     level: 0,
                 }),
-                js::ImportSpecifier::Default(x) => py::Stmt::ImportFrom(py::StmtImportFrom {
-                    range: span.convert(state),
-                    module: Some(py::Identifier::new(&src, TextRange::default())),
-                    names: vec![py::Alias {
-                        range: TextRange::default(),
-                        asname: Some(x.local.convert(state)),
-                        name: py::Identifier::new(safe_name("default"), TextRange::default()),
-                    }],
-                    level: 0,
-                }),
+                js::ImportSpecifier::Default(x) => {
+                    if src1.ends_with(".json") {
+                        let mut script_dir = state.script_path.clone();
+                        script_dir.pop();
+                        let mut src2 = src1;
+                        let mut remove_levels = 0u32;
+                        while let Some(y) = src2.strip_prefix("../") {
+                            if state.flatten_dirs.contains(&script_dir) {
+                                remove_levels += 1;
+                            }
+                            script_dir.pop();
+                            src2 = y;
+                        }
+                        let mut src = src1;
+                        for _ in 0..remove_levels {
+                            src = src.strip_prefix("../").unwrap();
+                        }
+                        let tmp = state.gen_name();
+                        let script_path = py::Expr::Call(py::ExprCall {
+                            range: TextRange::default(),
+                            func: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                                range: TextRange::default(),
+                                value: Box::new(state.import("pathlib")),
+                                attr: py::Identifier::new("Path", TextRange::default()),
+                                ctx: py::ExprContext::Load,
+                            })),
+                            arguments: py::Arguments {
+                                range: TextRange::default(),
+                                args: Box::new([py::Expr::Name(py::ExprName {
+                                    range: TextRange::default(),
+                                    id: "__file__".to_owned(),
+                                    ctx: py::ExprContext::Load,
+                                })]),
+                                keywords: Box::new([]),
+                            },
+                        });
+                        let script_parent = py::Expr::Attribute(py::ExprAttribute {
+                            range: TextRange::default(),
+                            value: Box::new(script_path),
+                            attr: py::Identifier::new("parent", TextRange::default()),
+                            ctx: py::ExprContext::Load,
+                        });
+                        let json_path = py::Expr::BinOp(py::ExprBinOp {
+                            range: TextRange::default(),
+                            left: Box::new(script_parent),
+                            op: py::Operator::Div,
+                            right: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
+                                range: TextRange::default(),
+                                value: py::StringLiteralValue::single(py::StringLiteral {
+                                    range: TextRange::default(),
+                                    value: src.into(),
+                                    flags: Default::default(),
+                                }),
+                            })),
+                        });
+                        let resolved_json_path = py::Expr::Call(py::ExprCall {
+                            range: TextRange::default(),
+                            func: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                                range: TextRange::default(),
+                                value: Box::new(json_path),
+                                attr: py::Identifier::new("resolve", TextRange::default()),
+                                ctx: py::ExprContext::Load,
+                            })),
+                            arguments: py::Arguments {
+                                range: TextRange::default(),
+                                args: Box::new([]),
+                                keywords: Box::new([]),
+                            },
+                        });
+                        let opened_file = py::Expr::Call(py::ExprCall {
+                            range: TextRange::default(),
+                            func: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                                range: TextRange::default(),
+                                value: Box::new(resolved_json_path),
+                                attr: py::Identifier::new("open", TextRange::default()),
+                                ctx: py::ExprContext::Load,
+                            })),
+                            arguments: py::Arguments {
+                                range: TextRange::default(),
+                                args: Box::new([py::Expr::StringLiteral(py::ExprStringLiteral {
+                                    range: TextRange::default(),
+                                    value: py::StringLiteralValue::single(py::StringLiteral {
+                                        range: TextRange::default(),
+                                        value: "rt".into(),
+                                        flags: Default::default(),
+                                    }),
+                                })]),
+                                keywords: Box::new([]),
+                            },
+                        });
+                        py::Stmt::With(py::StmtWith {
+                            range: span.convert(state),
+                            is_async: false,
+                            items: vec![py::WithItem {
+                                range: TextRange::default(),
+                                context_expr: opened_file,
+                                optional_vars: Some(Box::new(py::Expr::Name(py::ExprName {
+                                    range: TextRange::default(),
+                                    id: tmp.clone(),
+                                    ctx: py::ExprContext::Store,
+                                }))),
+                            }],
+                            body: vec![py::Stmt::Assign(py::StmtAssign {
+                                range: span.convert(state),
+                                targets: vec![{
+                                    let id = x.local.convert(state);
+                                    py::Expr::Name(py::ExprName {
+                                        range: id.range,
+                                        id: id.id,
+                                        ctx: py::ExprContext::Store,
+                                    })
+                                }],
+                                value: Box::new(py::Expr::Call(py::ExprCall {
+                                    range: TextRange::default(),
+                                    func: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                                        range: TextRange::default(),
+                                        value: Box::new(state.import("json")),
+                                        attr: py::Identifier::new("load", TextRange::default()),
+                                        ctx: py::ExprContext::Load,
+                                    })),
+                                    arguments: py::Arguments {
+                                        range: TextRange::default(),
+                                        args: Box::new([py::Expr::Name(py::ExprName {
+                                            range: TextRange::default(),
+                                            id: tmp,
+                                            ctx: py::ExprContext::Store,
+                                        })]),
+                                        keywords: Box::new([]),
+                                    },
+                                })),
+                            })],
+                        })
+                    } else {
+                        py::Stmt::ImportFrom(py::StmtImportFrom {
+                            range: span.convert(state),
+                            module: Some(py::Identifier::new(&src, TextRange::default())),
+                            names: vec![py::Alias {
+                                range: TextRange::default(),
+                                asname: Some(x.local.convert(state)),
+                                name: py::Identifier::new(
+                                    safe_name("default"),
+                                    TextRange::default(),
+                                ),
+                            }],
+                            level: 0,
+                        })
+                    }
+                }
                 js::ImportSpecifier::Namespace(_) => {
                     todo!("ImportSpecifier::Namespace")
                 }
@@ -557,7 +696,9 @@ impl State {
         })
     }
     fn add_import(&self, name: &str) {
-        self.js_imports.insert(name.to_owned());
+        if !name.ends_with(".json") && (name.starts_with("./") || name.starts_with("../")) {
+            self.js_imports.insert(name.to_owned());
+        }
     }
 }
 impl From<py::Stmt> for HopefullyExpr {
@@ -5033,7 +5174,7 @@ fn main() {
         paths.push(path.to_owned());
     }
 
-    let mut flatten_dirs = HashSet::new();
+    let mut flatten_dirs = HashMap::new();
     for path in &paths {
         eprintln!("{path:?}");
         let path2 = path.strip_prefix("a").unwrap();
@@ -5069,11 +5210,13 @@ fn main() {
             let mut path2 = path2.to_owned();
             while let Some(x) = import.strip_prefix("../") {
                 path2.pop();
-                flatten_dirs.insert(path2.clone());
+                flatten_dirs.insert(path2.clone(), path.clone());
                 import = x;
             }
         }
     }
+    // panic!("{flatten_dirs:#?}");
+    let flatten_dirs: HashSet<_> = flatten_dirs.into_keys().collect();
 
     for path in paths {
         let script_path = path.strip_prefix("a").unwrap();
