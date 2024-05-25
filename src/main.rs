@@ -140,19 +140,43 @@ fn safe_params(params: py::Parameters) -> py::Parameters {
     py::Parameters {
         range,
         posonlyargs,
-        args: args
-            .into_iter()
-            .map(|mut x| {
-                if x.default.is_some() {
-                    must_have_default = true;
-                } else if must_have_default {
-                    x.default = Some(Box::new(py::Expr::NoneLiteral(py::ExprNoneLiteral {
-                        range: TextRange::default(),
-                    })));
+        args: {
+            let mut args = args
+                .into_iter()
+                .map(|mut x| {
+                    if x.default.is_some() {
+                        must_have_default = true;
+                    } else if must_have_default {
+                        x.default = Some(Box::new(py::Expr::NoneLiteral(py::ExprNoneLiteral {
+                            range: TextRange::default(),
+                        })));
+                    }
+                    x
+                })
+                .collect::<Vec<_>>();
+            args.reverse();
+            for arg in &mut args {
+                if arg.default.is_some() {
+                    continue;
+                } else {
+                    match arg.parameter.annotation.as_deref() {
+                        Some(py::Expr::Subscript(py::ExprSubscript { value, .. }))
+                            if matches!(&**value, py::Expr::Name(py::ExprName {
+                            id,
+                            ..
+                        }) if id == "Optional") =>
+                        {
+                            arg.default =
+                                Some(Box::new(py::Expr::NoneLiteral(py::ExprNoneLiteral {
+                                    range: TextRange::default(),
+                                })));
+                        }
+                        _ => break,
+                    }
                 }
-                x
-            })
-            .collect(),
+            }
+            args
+        },
         vararg,
         kwarg,
         kwonlyargs,
