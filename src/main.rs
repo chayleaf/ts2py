@@ -470,6 +470,13 @@ impl From<Vec<py::Stmt>> for HopefullyExpr {
         let name = match stmts.last().unwrap() {
             py::Stmt::FunctionDef(x) => x.name.clone(),
             py::Stmt::ClassDef(x) => x.name.clone(),
+            py::Stmt::Assign(x) => {
+                assert!(x.targets.len() == 1);
+                match &x.targets[0] {
+                    py::Expr::Name(x) => py::Identifier::new(x.id.clone(), x.range),
+                    x => todo!("{x:?}"),
+                }
+            }
             x => todo!("{x:?}"),
         };
         Self {
@@ -2723,6 +2730,17 @@ impl Convert for js::TsInterfaceDecl {
             body,
         } = self;
         let mut stmts = vec![];
+        let (body, index) = body.convert(state).unwrap_into(&mut stmts);
+        if let Some((k, v)) = index {
+            assert!(body.is_empty());
+            stmts.push(index_assign(
+                id.convert(state).id,
+                k,
+                v,
+                span.convert(state),
+            ));
+            return stmts;
+        }
         let ret = py::StmtClassDef {
             range: span.convert(state),
             decorator_list: vec![],
@@ -2736,26 +2754,43 @@ impl Convert for js::TsInterfaceDecl {
             })),
             type_params: type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
             name: id.convert(state),
-            body: safe_block(body.convert(state).unwrap_into(&mut stmts)),
+            body: safe_block(body),
         };
         stmts.push(py::Stmt::ClassDef(ret));
         stmts
     }
 }
 
+#[allow(clippy::type_complexity)]
+fn convert_class_body(
+    state: &State,
+    body: Vec<js::TsTypeElement>,
+) -> WithStmts<(Vec<py::Stmt>, Option<(py::Expr, py::Expr)>)> {
+    let mut stmts = Vec::new();
+    let mut index = None;
+    WithStmts {
+        expr: (
+            body.convert(state)
+                .into_iter()
+                .flat_map(|x| match x.unwrap_into(&mut stmts) {
+                    ClassMember::Member(x) => Some(x),
+                    ClassMember::Index(a, b) => {
+                        index = Some((a, b));
+                        None
+                    }
+                })
+                .collect(),
+            index,
+        ),
+        stmts,
+    }
+}
+
 impl Convert for js::TsInterfaceBody {
-    type Py = WithStmts<Vec<py::Stmt>>;
+    type Py = WithStmts<(Vec<py::Stmt>, Option<(py::Expr, py::Expr)>)>;
     fn convert(self, state: &State) -> Self::Py {
         let Self { span: _, body } = self;
-        let mut stmts = Vec::new();
-        WithStmts {
-            expr: body
-                .convert(state)
-                .into_iter()
-                .map(|x| x.unwrap_into(&mut stmts))
-                .collect(),
-            stmts,
-        }
+        convert_class_body(state, body)
     }
 }
 
@@ -3043,38 +3078,80 @@ impl Convert for js::ClassMethod {
     }
 }
 
+fn index_assign(name: String, k: py::Expr, v: py::Expr, span: TextRange) -> py::Stmt {
+    py::Stmt::Assign(py::StmtAssign {
+        range: span,
+        targets: vec![py::Expr::Name(py::ExprName {
+            range: TextRange::default(),
+            id: name,
+            ctx: py::ExprContext::Store,
+        })],
+        value: Box::new(py::Expr::Subscript(py::ExprSubscript {
+            range: TextRange::default(),
+            value: Box::new(py::Expr::Name(py::ExprName {
+                range: TextRange::default(),
+                id: "dict".to_owned(),
+                ctx: py::ExprContext::Load,
+            })),
+            slice: Box::new(py::Expr::Tuple(py::ExprTuple {
+                range: TextRange::default(),
+                parenthesized: false,
+                ctx: py::ExprContext::Load,
+                elts: vec![k, v],
+            })),
+            ctx: py::ExprContext::Load,
+        })),
+    })
+}
+
+fn convert_type_lit(
+    state: &State,
+    lit: js::TsTypeLit,
+    id: Option<js::Ident>,
+    type_params: Option<js::TsTypeParamDecl>,
+) -> Vec<py::Stmt> {
+    let js::TsTypeLit { span, members } = lit;
+    let mut stmts = vec![];
+    let (body, index) = convert_class_body(state, members).unwrap_into(&mut stmts);
+    if let Some((k, v)) = index {
+        assert!(body.is_empty());
+        stmts.push(index_assign(
+            id.map(|x| x.convert(state).id)
+                .unwrap_or_else(|| state.gen_name()),
+            k,
+            v,
+            span.convert(state),
+        ));
+        return stmts;
+    }
+    let ret = py::Stmt::ClassDef(py::StmtClassDef {
+        range: span.convert(state),
+        decorator_list: vec![],
+        arguments: Some(Box::new(py::Arguments {
+            range: TextRange::default(),
+            keywords: Box::new([]),
+            args: Box::new([py::Expr::Attribute(py::ExprAttribute {
+                range: span.convert(state),
+                value: Box::new(state.import("typing")),
+                attr: py::Identifier {
+                    range: TextRange::default(),
+                    id: "TypedDict".to_owned(),
+                },
+                ctx: py::ExprContext::Load,
+            })]),
+        })),
+        type_params: type_params.map(|x| Box::new(x.convert(state).unwrap_into(&mut stmts))),
+        name: id.convert(state).unwrap_or_else(|| state.gen_ident()),
+        body: safe_block(body),
+    });
+    stmts.push(ret);
+    stmts
+}
+
 impl Convert for js::TsTypeLit {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
-        let Self { span, members } = self;
-        let mut stmts = vec![];
-        let ret = py::StmtClassDef {
-            range: span.convert(state),
-            decorator_list: vec![],
-            arguments: Some(Box::new(py::Arguments {
-                range: TextRange::default(),
-                keywords: Box::new([]),
-                args: Box::new([py::Expr::Attribute(py::ExprAttribute {
-                    range: span.convert(state),
-                    value: Box::new(state.import("typing")),
-                    attr: py::Identifier {
-                        range: TextRange::default(),
-                        id: "TypedDict".to_owned(),
-                    },
-                    ctx: py::ExprContext::Load,
-                })]),
-            })),
-            type_params: None,
-            name: state.gen_ident(),
-            body: safe_block(
-                members
-                    .into_iter()
-                    .map(|x| x.convert(state).unwrap_into(&mut stmts))
-                    .collect(),
-            ),
-        };
-        stmts.push(py::Stmt::ClassDef(ret));
-        stmts
+        convert_type_lit(state, self, None, None)
     }
 }
 
@@ -3090,36 +3167,7 @@ impl Convert for js::TsTypeAliasDecl {
         } = self;
         match *type_ann {
             js::TsType::TsTypeLit(lit) => {
-                let js::TsTypeLit { span, members } = lit;
-                let mut stmts = vec![];
-                let ret = py::Stmt::ClassDef(py::StmtClassDef {
-                    range: span.convert(state),
-                    decorator_list: vec![],
-                    arguments: Some(Box::new(py::Arguments {
-                        range: TextRange::default(),
-                        keywords: Box::new([]),
-                        args: Box::new([py::Expr::Attribute(py::ExprAttribute {
-                            range: span.convert(state),
-                            value: Box::new(state.import("typing")),
-                            attr: py::Identifier {
-                                range: TextRange::default(),
-                                id: "TypedDict".to_owned(),
-                            },
-                            ctx: py::ExprContext::Load,
-                        })]),
-                    })),
-                    type_params: type_params
-                        .map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
-                    name: id.convert(state),
-                    body: safe_block(
-                        members
-                            .into_iter()
-                            .map(|x| x.convert(state).unwrap_into(&mut stmts))
-                            .collect(),
-                    ),
-                });
-                stmts.push(ret);
-                stmts
+                convert_type_lit(state, lit, Some(id), type_params.map(|x| *x))
             }
             x => {
                 let WithStmts { expr, mut stmts } = x.convert(state);
@@ -3139,19 +3187,30 @@ impl Convert for js::TsTypeAliasDecl {
 }
 
 impl Convert for js::TsTypeElement {
-    type Py = WithStmts<py::Stmt>;
+    type Py = WithStmts<ClassMember>;
     fn convert(self, state: &State) -> Self::Py {
         match self {
-            Self::TsPropertySignature(ty) => ty.convert(state).map1(py::Stmt::AnnAssign),
-            Self::TsMethodSignature(ty) => ty.convert(state).map1(py::Stmt::FunctionDef),
+            Self::TsPropertySignature(ty) => ty
+                .convert(state)
+                .map1(py::Stmt::AnnAssign)
+                .map1(ClassMember::Member),
+            Self::TsMethodSignature(ty) => ty
+                .convert(state)
+                .map1(py::Stmt::FunctionDef)
+                .map1(ClassMember::Member),
             Self::TsIndexSignature(ty) => ty.convert(state),
             x => todo!("{x:?}"),
         }
     }
 }
 
+enum ClassMember {
+    Index(py::Expr, py::Expr),
+    Member(py::Stmt),
+}
+
 impl Convert for js::TsIndexSignature {
-    type Py = WithStmts<py::Stmt>;
+    type Py = WithStmts<ClassMember>;
     fn convert(self, state: &State) -> Self::Py {
         let Self {
             params,
@@ -3162,61 +3221,36 @@ impl Convert for js::TsIndexSignature {
         } = self;
         assert!(!is_static);
         assert_eq!(params.len(), 1);
-        let name = "__index_type".to_owned();
         let mut stmts = Vec::new();
         WithStmts {
-            expr: py::Stmt::Assign(py::StmtAssign {
-                targets: vec![py::Expr::Name(py::ExprName {
-                    range: span.convert(state),
-                    id: name,
-                    ctx: py::ExprContext::Store,
-                })],
-                range: span.convert(state),
-                value: Box::new(py::Expr::Subscript(py::ExprSubscript {
-                    range: span.convert(state),
-                    value: Box::new(py::Expr::Name(py::ExprName {
+            expr: ClassMember::Index(
+                match params
+                    .into_iter()
+                    .next()
+                    .unwrap()
+                    .convert(state)
+                    .unwrap_into(&mut stmts)
+                {
+                    PyParameter::Single(x) => x.parameter.annotation.map_or_else(
+                        || {
+                            py::Expr::Attribute(py::ExprAttribute {
+                                range: span.convert(state),
+                                value: Box::new(state.import("typing")),
+                                attr: py::Identifier {
+                                    range: TextRange::default(),
+                                    id: "Any".to_owned(),
+                                },
+                                ctx: py::ExprContext::Load,
+                            })
+                        },
+                        |x| *x,
+                    ),
+                    PyParameter::Rest(_) => py::Expr::EllipsisLiteral(py::ExprEllipsisLiteral {
                         range: TextRange::default(),
-                        id: "dict".to_owned(),
-                        ctx: py::ExprContext::Load,
-                    })),
-                    slice: Box::new(py::Expr::Tuple(py::ExprTuple {
-                        range: TextRange::default(),
-                        parenthesized: false,
-                        ctx: py::ExprContext::Load,
-                        elts: vec![
-                            match params
-                                .into_iter()
-                                .next()
-                                .unwrap()
-                                .convert(state)
-                                .unwrap_into(&mut stmts)
-                            {
-                                PyParameter::Single(x) => x.parameter.annotation.map_or_else(
-                                    || {
-                                        py::Expr::Attribute(py::ExprAttribute {
-                                            range: span.convert(state),
-                                            value: Box::new(state.import("typing")),
-                                            attr: py::Identifier {
-                                                range: TextRange::default(),
-                                                id: "Any".to_owned(),
-                                            },
-                                            ctx: py::ExprContext::Load,
-                                        })
-                                    },
-                                    |x| *x,
-                                ),
-                                PyParameter::Rest(_) => {
-                                    py::Expr::EllipsisLiteral(py::ExprEllipsisLiteral {
-                                        range: TextRange::default(),
-                                    })
-                                }
-                            },
-                            type_ann.unwrap().convert(state).unwrap_into(&mut stmts),
-                        ],
-                    })),
-                    ctx: py::ExprContext::Load,
-                })),
-            }),
+                    }),
+                },
+                type_ann.unwrap().convert(state).unwrap_into(&mut stmts),
+            ),
             stmts,
         }
     }
