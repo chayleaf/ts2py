@@ -1233,16 +1233,129 @@ impl Convert for js::Expr {
                 sym,
                 span,
                 optional: _,
-            }) => if sym.as_str() == "undefined" {
-                py::Expr::NoneLiteral(py::ExprNoneLiteral {
+            }) => match sym.as_str() {
+                "undefined" => py::Expr::NoneLiteral(py::ExprNoneLiteral {
                     range: span.convert(state),
-                })
-            } else {
-                py::Expr::Name(py::ExprName {
+                }),
+                "Promise" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                        range: span.convert(state),
+                        value: Box::new(state.import("collections")),
+                        attr: py::Identifier::new("abc", TextRange::default()),
+                        ctx: py::ExprContext::Load,
+                    })),
+                    attr: py::Identifier::new("Coroutine", TextRange::default()),
                     ctx,
-                    id: safe_name(sym.as_str()),
+                }),
+                "Iterator" => py::Expr::Attribute(py::ExprAttribute {
                     range: span.convert(state),
-                })
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                        range: span.convert(state),
+                        value: Box::new(state.import("collections")),
+                        attr: py::Identifier::new("abc", TextRange::default()),
+                        ctx: py::ExprContext::Load,
+                    })),
+                    attr: py::Identifier::new("Iterator", TextRange::default()),
+                    ctx,
+                }),
+                "AsyncIterator" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                        range: span.convert(state),
+                        value: Box::new(state.import("collections")),
+                        attr: py::Identifier::new("abc", TextRange::default()),
+                        ctx: py::ExprContext::Load,
+                    })),
+                    attr: py::Identifier::new("AsyncIterator", TextRange::default()),
+                    ctx,
+                }),
+                "Generator" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                        range: span.convert(state),
+                        value: Box::new(state.import("collections")),
+                        attr: py::Identifier::new("abc", TextRange::default()),
+                        ctx: py::ExprContext::Load,
+                    })),
+                    attr: py::Identifier::new("Generator", TextRange::default()),
+                    ctx,
+                }),
+                "AsyncGenerator" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                        range: span.convert(state),
+                        value: Box::new(state.import("collections")),
+                        attr: py::Identifier::new("abc", TextRange::default()),
+                        ctx: py::ExprContext::Load,
+                    })),
+                    attr: py::Identifier::new("AsyncGenerator", TextRange::default()),
+                    ctx,
+                }),
+                "atob" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(state.import("base64")),
+                    attr: py::Identifier::new("b64decode", TextRange::default()),
+                    ctx,
+                }),
+                "btoa" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(state.import("base64")),
+                    attr: py::Identifier::new("b64encode", TextRange::default()),
+                    ctx,
+                }),
+                "Infinity" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(state.import("math")),
+                    attr: py::Identifier::new("inf", TextRange::default()),
+                    ctx,
+                }),
+                "NaN" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(state.import("math")),
+                    attr: py::Identifier::new("nan", TextRange::default()),
+                    ctx,
+                }),
+                "Object" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(state.import("typing")),
+                    attr: py::Identifier::new("Any", TextRange::default()),
+                    ctx,
+                }),
+                "Date" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(state.import("datetime")),
+                    attr: py::Identifier::new("datetime", TextRange::default()),
+                    ctx,
+                }),
+                "Math" => state.import("math"),
+                "Function" => py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                        range: span.convert(state),
+                        value: Box::new(state.import("collections")),
+                        attr: py::Identifier::new("abc", TextRange::default()),
+                        ctx: py::ExprContext::Load,
+                    })),
+                    attr: py::Identifier::new("Callable", TextRange::default()),
+                    ctx,
+                }),
+                s => py::Expr::Name(py::ExprName {
+                    ctx,
+                    id: match s {
+                        "Error" => "Exception".to_owned(),
+                        "RangeError" => "ValueError".to_owned(),
+                        "Boolean" => "bool".to_owned(),
+                        "parseInt" | "BigInt" => "int".to_owned(),
+                        "parseFloat" | "Number" => "float".to_owned(),
+                        "String" => "str".to_owned(),
+                        "Array" => "list".to_owned(),
+                        "Map" => "dict".to_owned(),
+                        "Set" => "set".to_owned(),
+                        s => safe_name(s),
+                    },
+                    range: span.convert(state),
+                }),
             }
             .into(),
             Self::Lit(lit) => lit.convert2(state, ctx).into(),
