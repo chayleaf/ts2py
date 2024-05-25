@@ -5128,7 +5128,7 @@ impl Convert for js::ForStmt {
         } = self;
         let mut stmts = vec![];
         if let Some(init) = init {
-            init.convert(state);
+            stmts.extend(init.convert(state));
         }
         let mut body = (*body).convert(state);
         if let Some(upd) = update {
