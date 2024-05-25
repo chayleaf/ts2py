@@ -510,6 +510,55 @@ impl Convert for js::ImportDecl {
     }
 }
 
+impl Convert for js::ExportDefaultDecl {
+    type Py = Vec<py::Stmt>;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self { span, decl } = self;
+        let mut stmts = decl.convert(state);
+        stmts.push(py::Stmt::Assign(py::StmtAssign {
+            range: span.convert(state),
+            targets: vec![py::Expr::Name(py::ExprName {
+                range: TextRange::default(),
+                id: "default".to_owned(),
+                ctx: py::ExprContext::Store,
+            })],
+            value: Box::new({
+                let id = match stmts.last().unwrap() {
+                    py::Stmt::FunctionDef(x) => x.name.clone(),
+                    py::Stmt::ClassDef(x) => x.name.clone(),
+                    py::Stmt::Assign(x) => {
+                        assert!(x.targets.len() == 1);
+                        let id = x.targets[0].as_name_expr().unwrap();
+                        py::Identifier::new(&id.id, id.range)
+                    }
+                    x => todo!("{x:?}"),
+                };
+                py::Expr::Name(py::ExprName {
+                    range: id.range,
+                    id: id.id,
+                    ctx: py::ExprContext::Load,
+                })
+            }),
+        }));
+        stmts
+    }
+}
+
+impl Convert for js::DefaultDecl {
+    type Py = Vec<py::Stmt>;
+    fn convert(self, state: &State) -> Self::Py {
+        match self {
+            Self::Fn(x) => {
+                let WithStmts { expr, mut stmts } = x.convert(state);
+                stmts.push(py::Stmt::FunctionDef(expr));
+                stmts
+            }
+            Self::TsInterfaceDecl(x) => (*x).convert(state),
+            x => todo!("{x:?}"),
+        }
+    }
+}
+
 impl Convert for js::ExportDefaultExpr {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
@@ -706,6 +755,7 @@ impl Convert for js::ModuleItem {
                 js::ModuleDecl::ExportAll(decl) => vec![py::Stmt::ImportFrom(decl.convert(state))],
                 js::ModuleDecl::ExportNamed(decl) => decl.convert(state),
                 js::ModuleDecl::ExportDefaultExpr(decl) => decl.convert(state),
+                js::ModuleDecl::ExportDefaultDecl(decl) => decl.convert(state),
                 _ => todo!("{m:?}"),
             },
         }
