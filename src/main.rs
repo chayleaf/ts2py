@@ -2758,23 +2758,24 @@ impl Convert for js::Constructor {
                 range: span.convert(state),
                 is_async: false,
                 decorator_list: vec![],
-                name: match key.convert(state).unwrap_into(&mut stmts) {
-                    py::Expr::StringLiteral(x) => {
-                        py::Identifier::new(safe_name(x.value.to_str()), x.range)
-                    }
-                    x => todo!("{x:?}"),
-                },
+                name: py::Identifier::new("__init__", key.span().convert(state)),
                 parameters: Box::new(safe_params(py::Parameters {
                     range: TextRange::default(),
-                    args: params
-                        .convert(state)
-                        .into_iter()
-                        .map(|x| {
-                            let (x, stmts) = x.unwrap_into(&mut stmts);
-                            body_stmts.extend(stmts);
-                            x
-                        })
-                        .collect(),
+                    args: std::iter::once(py::ParameterWithDefault {
+                        range: TextRange::default(),
+                        default: None,
+                        parameter: py::Parameter {
+                            range: TextRange::default(),
+                            name: py::Identifier::new("self", TextRange::default()),
+                            annotation: None,
+                        },
+                    })
+                    .chain(params.convert(state).into_iter().map(|x| {
+                        let (x, stmts) = x.unwrap_into(&mut stmts);
+                        body_stmts.extend(stmts);
+                        x
+                    }))
+                    .collect(),
                     posonlyargs: vec![],
                     kwonlyargs: vec![],
                     vararg: None,
@@ -4065,10 +4066,6 @@ fn main() {
                 import = x;
             }
         }
-    }
-
-    for _ in 0..5 {
-        println!();
     }
 
     for path in paths {
