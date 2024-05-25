@@ -208,10 +208,16 @@ fn convert_import_path(script_path: &Path, src: &str, flatten_dirs: &HashSet<Pat
 fn cleanup_import(state: &State, src: &str) -> String {
     if src.starts_with("./") || src.starts_with("../") {
         let conv1 = convert_import_path(&state.script_path, src, &state.flatten_dirs);
+        let mut parent = state.script_path.clone();
+        parent.pop();
         let conv2 = convert_import_path(
             &state.script_path,
             if state.script_path.ends_with("index.js") || state.script_path.ends_with("index.ts") {
-                "."
+                if state.flatten_dirs.contains(&parent) {
+                    "."
+                } else {
+                    "__init__"
+                }
             } else {
                 state
                     .script_path
