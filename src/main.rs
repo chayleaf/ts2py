@@ -1269,7 +1269,7 @@ impl Convert for js::Expr {
             Self::OptChain(expr) => expr.convert2(state, ctx),
             Self::Update(expr) => expr.convert2(state, ctx),
             Self::SuperProp(expr) => expr.convert2(state, ctx),
-            Self::TaggedTpl(expr) => expr.convert2(state, ctx).map1(py::Expr::FString),
+            Self::TaggedTpl(expr) => expr.convert2(state, ctx),
             x => todo!("{x:?}"),
         }
     }
@@ -1734,15 +1734,25 @@ impl Convert for js::AssignTarget {
 }
 
 impl Convert for js::TaggedTpl {
-    type Py = WithStmts<py::ExprFString>;
+    type Py = WithStmts<py::Expr>;
     fn convert(self, state: &State) -> Self::Py {
         let Self {
-            span: _,
-            tag: _,
+            span,
+            tag,
             type_params: _,
             tpl,
         } = self;
-        (*tpl).convert(state)
+        (*tag).convert(state).map(|tag, stmts| {
+            py::Expr::Call(py::ExprCall {
+                range: span.convert(state),
+                func: Box::new(tag),
+                arguments: py::Arguments {
+                    range: TextRange::default(),
+                    args: Box::new([py::Expr::FString((*tpl).convert(state).unwrap_into(stmts))]),
+                    keywords: Box::new([]),
+                },
+            })
+        })
     }
 }
 
