@@ -103,6 +103,21 @@ fn safe_name(s: &str) -> String {
     s
 }
 
+fn resolve_name(s: &str) -> String {
+    match s {
+        "Error" => "Exception".to_owned(),
+        "RangeError" => "ValueError".to_owned(),
+        "Boolean" => "bool".to_owned(),
+        "parseInt" | "BigInt" => "int".to_owned(),
+        "parseFloat" | "Number" | "number" => "float".to_owned(),
+        "String" => "str".to_owned(),
+        "Array" => "list".to_owned(),
+        "Map" | "Record" => "dict".to_owned(),
+        "Set" => "set".to_owned(),
+        s => safe_name(s),
+    }
+}
+
 fn safe_block(mut stmts: Vec<py::Stmt>) -> Vec<py::Stmt> {
     if stmts.is_empty() {
         stmts.push(py::Stmt::Pass(py::StmtPass {
@@ -1953,18 +1968,7 @@ impl Convert for js::Expr {
                 }),
                 s => py::Expr::Name(py::ExprName {
                     ctx,
-                    id: match s {
-                        "Error" => "Exception".to_owned(),
-                        "RangeError" => "ValueError".to_owned(),
-                        "Boolean" => "bool".to_owned(),
-                        "parseInt" | "BigInt" => "int".to_owned(),
-                        "parseFloat" | "Number" | "number" => "float".to_owned(),
-                        "String" => "str".to_owned(),
-                        "Array" => "list".to_owned(),
-                        "Map" => "dict".to_owned(),
-                        "Set" => "set".to_owned(),
-                        s => safe_name(s),
-                    },
+                    id: resolve_name(s),
                     range: span.convert(state),
                 }),
             }
@@ -3562,7 +3566,7 @@ impl Convert for js::TsEntityName {
                 optional: _,
             }) => py::Expr::Name(py::ExprName {
                 range: span.convert(state),
-                id: safe_name(sym.as_str()),
+                id: resolve_name(sym.as_str()),
                 ctx: py::ExprContext::Load,
             }),
             Self::TsQualifiedName(x) => (*x).convert(state),
