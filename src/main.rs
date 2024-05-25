@@ -2191,8 +2191,21 @@ impl Convert for js::Expr {
             Self::MetaProp(expr) => expr.convert2(state, ctx),
             Self::TsTypeAssertion(expr) => expr.convert2(state, ctx),
             Self::Seq(expr) => expr.convert2(state, ctx),
+            Self::TsInstantiation(expr) => expr.convert2(state, ctx),
             x => todo!("{x:?}"),
         }
+    }
+}
+
+impl Convert for js::TsInstantiation {
+    type Py = HopefullyExpr;
+    fn convert2(self, state: &State, ctx: py::ExprContext) -> Self::Py {
+        let Self {
+            span: _,
+            expr,
+            type_args: _,
+        } = self;
+        (*expr).convert2(state, ctx)
     }
 }
 
@@ -5913,6 +5926,9 @@ fn main() {
             continue;
         }
         let path = entry.path();
+        if path.iter().any(|x| x == "node_modules") {
+            continue;
+        }
         let Some(stem) = path.file_stem() else {
             continue;
         };
