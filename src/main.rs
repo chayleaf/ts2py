@@ -1507,10 +1507,10 @@ fn convert_func(
     } = function;
     assert!(!is_generator);
     let mut body_stmts = vec![];
-    let returns = return_type.map(|x| Box::new((*x).convert(state).unwrap_into(&mut body_stmts)));
-    let type_params =
-        type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut body_stmts)));
     let mut ret_stmts = vec![];
+    let returns = return_type.map(|x| Box::new((*x).convert(state).unwrap_into(&mut ret_stmts)));
+    let type_params =
+        type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut ret_stmts)));
     let mut vararg = None;
     WithStmts {
         expr: py::StmtFunctionDef {
@@ -5899,6 +5899,7 @@ fn main() {
                 e.into_diagnostic(&handler).emit();
             })
             .expect("failed to parse module");
+        // println!("{module:#?}");
         let module = module.convert(&State::new(script_path, &flatten_dirs));
         let locator = ruff_source_file::Locator::new("");
         let stylist = ruff_python_codegen::Stylist::from_tokens(&[], &locator);
