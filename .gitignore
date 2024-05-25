@@ -1,9 +1,5 @@
 /target
 /ignore
 test.ts
-/a
-/b
-/a1
-/b1
-/a2
-/b2
+/a*
+/b*

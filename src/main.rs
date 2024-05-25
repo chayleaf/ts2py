@@ -175,6 +175,7 @@ fn safe_params(params: py::Parameters) -> py::Parameters {
                     }
                 }
             }
+            args.reverse();
             args
         },
         vararg,
@@ -869,7 +870,9 @@ impl Convert for js::ObjectPat {
                         type_ann,
                         body_stmts: stmts2,
                         def_val: _,
+                        is_rest,
                     } = (*value).convert(state).unwrap_into(&mut stmts);
+                    assert!(!is_rest);
                     let target = py::Expr::Name(py::ExprName {
                         range: TextRange::default(),
                         id: val.id,
@@ -919,7 +922,9 @@ impl Convert for js::ObjectPat {
                         type_ann: _,
                         body_stmts: stmts2,
                         def_val: _,
+                        is_rest,
                     } = arg.convert(state).expr;
+                    assert!(!is_rest);
                     let target = py::Expr::Name(py::ExprName {
                         range: TextRange::default(),
                         id: id.id.clone(),
@@ -1050,6 +1055,7 @@ struct PatPy<T = py::Identifier> {
     type_ann: Option<py::Expr>,
     body_stmts: Vec<py::Stmt>,
     def_val: Option<py::Expr>,
+    is_rest: bool,
 }
 
 impl<T> PatPy<T> {
@@ -1059,6 +1065,7 @@ impl<T> PatPy<T> {
             type_ann: self.type_ann,
             body_stmts: self.body_stmts,
             def_val: self.def_val,
+            is_rest: self.is_rest,
         }
     }
 }
@@ -1073,6 +1080,7 @@ impl Default for PatPy<py::Identifier> {
             type_ann: None,
             body_stmts: vec![],
             def_val: None,
+            is_rest: false,
         }
     }
 }
@@ -1088,6 +1096,7 @@ impl Default for PatPy<py::Expr> {
             type_ann: None,
             body_stmts: vec![],
             def_val: None,
+            is_rest: false,
         }
     }
 }
@@ -1156,6 +1165,7 @@ impl Convert for js::Pat {
                     })],
                     id,
                     def_val: None,
+                    is_rest: false,
                 }
             }),
             x => todo!("{x:?}"),
@@ -1187,7 +1197,9 @@ impl Convert for js::RestPat {
             arg,
             type_ann: _,
         } = self;
-        (*arg).convert(state)
+        let mut ret = (*arg).convert(state);
+        ret.expr.is_rest = true;
+        ret
     }
 }
 
@@ -1258,7 +1270,9 @@ impl Convert for js::ArrayPat {
                                 type_ann: _,
                                 body_stmts: stmts2,
                                 def_val: _,
+                                is_rest,
                             } = x.convert(state).expr;
+                            assert!(!is_rest);
                             body_stmts.extend(stmts2);
                             py::Expr::Name(py::ExprName {
                                 range: x.range,
@@ -1497,6 +1511,7 @@ fn convert_func(
     let type_params =
         type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut body_stmts)));
     let mut ret_stmts = vec![];
+    let mut vararg = None;
     WithStmts {
         expr: py::StmtFunctionDef {
             is_async,
@@ -1507,15 +1522,24 @@ fn convert_func(
                 args: params
                     .convert(state)
                     .into_iter()
-                    .map(|x| {
-                        let (a, b) = x.unwrap_into(&mut ret_stmts);
+                    .flat_map(|x| {
+                        let Param {
+                            param,
+                            body_stmts: b,
+                            is_rest,
+                        } = x.unwrap_into(&mut ret_stmts);
                         body_stmts.extend(b);
-                        a
+                        if is_rest {
+                            vararg = Some(Box::new(param.parameter));
+                            None
+                        } else {
+                            Some(param)
+                        }
                     })
                     .collect(),
                 posonlyargs: vec![],
                 kwonlyargs: vec![],
-                vararg: None,
+                vararg,
                 kwarg: None,
             })),
             body: {
@@ -1558,25 +1582,36 @@ impl Convert for js::ArrowExpr {
         assert!(!is_generator);
         let mut body_stmts = vec![];
         let mut stmts = vec![];
+        let mut vararg = None;
         let args = params
             .convert(state)
             .into_iter()
-            .map(|x| {
+            .flat_map(|x| {
                 let PatPy {
                     id,
                     type_ann,
                     body_stmts: stmts2,
                     def_val,
+                    is_rest,
                 } = x.unwrap_into(&mut stmts);
                 body_stmts.extend(stmts2);
-                py::ParameterWithDefault {
-                    range: TextRange::default(),
-                    default: def_val.map(Box::new),
-                    parameter: py::Parameter {
+                if is_rest {
+                    vararg = Some(Box::new(py::Parameter {
                         range: TextRange::default(),
                         annotation: type_ann.map(Box::new),
                         name: id,
-                    },
+                    }));
+                    None
+                } else {
+                    Some(py::ParameterWithDefault {
+                        range: TextRange::default(),
+                        default: def_val.map(Box::new),
+                        parameter: py::Parameter {
+                            range: TextRange::default(),
+                            annotation: type_ann.map(Box::new),
+                            name: id,
+                        },
+                    })
                 }
             })
             .collect();
@@ -1585,7 +1620,7 @@ impl Convert for js::ArrowExpr {
             args,
             posonlyargs: vec![],
             kwonlyargs: vec![],
-            vararg: None,
+            vararg,
             kwarg: None,
         };
         let expr = match *body {
@@ -2462,9 +2497,11 @@ impl Convert for js::AssignExpr {
                     type_ann,
                     body_stmts,
                     def_val: _,
+                    is_rest,
                 },
             stmts: stmts2,
         } = left.convert2(state, py::ExprContext::Store);
+        assert!(!is_rest);
         let WithStmts { expr, mut stmts } = (*right).convert(state);
         match op {
             js::AssignOp::Assign => {
@@ -4071,6 +4108,7 @@ impl Convert for js::Constructor {
         } = self;
         let mut stmts = vec![];
         let mut body_stmts = vec![];
+        let mut vararg = None;
         WithStmts {
             expr: py::StmtFunctionDef {
                 range: span.convert(state),
@@ -4088,15 +4126,24 @@ impl Convert for js::Constructor {
                             annotation: None,
                         },
                     })
-                    .chain(params.convert(state).into_iter().map(|x| {
-                        let (x, stmts) = x.unwrap_into(&mut stmts);
+                    .chain(params.convert(state).into_iter().flat_map(|x| {
+                        let Param {
+                            param,
+                            body_stmts: stmts,
+                            is_rest,
+                        } = x.unwrap_into(&mut stmts);
                         body_stmts.extend(stmts);
-                        x
+                        if is_rest {
+                            vararg = Some(Box::new(param.parameter));
+                            None
+                        } else {
+                            Some(param)
+                        }
                     }))
                     .collect(),
                     posonlyargs: vec![],
                     kwonlyargs: vec![],
-                    vararg: None,
+                    vararg,
                     kwarg: None,
                 })),
                 body: {
@@ -4951,7 +4998,9 @@ impl Convert for js::VarDecl {
                     type_ann,
                     body_stmts: stmts2,
                     def_val: _,
+                    is_rest,
                 } = name.convert(state).unwrap_into(&mut stmts);
+                assert!(!is_rest);
                 let init = init.map(|x| (*x).convert(state).unwrap_into(&mut stmts));
                 if stmts.len() == 1
                     && matches!(stmts[0], py::Stmt::ClassDef(_) | py::Stmt::FunctionDef(_))
@@ -5066,8 +5115,10 @@ impl Convert for js::CatchClause {
                 type_ann: typ,
                 mut body_stmts,
                 def_val: _,
+                is_rest,
             }) = param.convert(state).map(|x| x.unwrap_into(&mut stmts))
             {
+                assert!(!is_rest);
                 body_stmts.extend(body);
                 py::ExceptHandler::ExceptHandler(py::ExceptHandlerExceptHandler {
                     range: span.convert(state),
@@ -5312,7 +5363,9 @@ impl Convert for js::ForHead {
                     type_ann: _,
                     body_stmts,
                     def_val: _,
+                    is_rest,
                 } = name.convert(state).expr;
+                assert!(!is_rest);
                 assert!(init.is_none());
                 (
                     py::Expr::Name(py::ExprName {
@@ -5504,8 +5557,14 @@ impl Convert for js::IfStmt {
     }
 }
 
+struct Param {
+    param: py::ParameterWithDefault,
+    body_stmts: Vec<py::Stmt>,
+    is_rest: bool,
+}
+
 impl Convert for js::Param {
-    type Py = WithStmts<(py::ParameterWithDefault, Vec<py::Stmt>)>;
+    type Py = WithStmts<Param>;
     fn convert(self, state: &State) -> Self::Py {
         let Self {
             span,
@@ -5518,10 +5577,11 @@ impl Convert for js::Param {
             type_ann: ann,
             body_stmts,
             def_val,
+            is_rest,
         } = pat.convert(state).unwrap_into(&mut stmts);
         WithStmts {
-            expr: (
-                py::ParameterWithDefault {
+            expr: Param {
+                param: py::ParameterWithDefault {
                     range: span.convert(state),
                     default: def_val.map(Box::new),
                     parameter: py::Parameter {
@@ -5531,14 +5591,15 @@ impl Convert for js::Param {
                     },
                 },
                 body_stmts,
-            ),
+                is_rest,
+            },
             stmts,
         }
     }
 }
 
 impl Convert for js::ParamOrTsParamProp {
-    type Py = WithStmts<(py::ParameterWithDefault, Vec<py::Stmt>)>;
+    type Py = WithStmts<Param>;
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::Param(x) => x.convert(state),
@@ -5548,7 +5609,7 @@ impl Convert for js::ParamOrTsParamProp {
 }
 
 impl Convert for js::TsParamProp {
-    type Py = WithStmts<(py::ParameterWithDefault, Vec<py::Stmt>)>;
+    type Py = WithStmts<Param>;
     fn convert(self, state: &State) -> Self::Py {
         let Self {
             span: _,
@@ -5562,7 +5623,7 @@ impl Convert for js::TsParamProp {
     }
 }
 impl Convert for js::TsParamPropParam {
-    type Py = WithStmts<(py::ParameterWithDefault, Vec<py::Stmt>)>;
+    type Py = WithStmts<Param>;
     fn convert(self, state: &State) -> Self::Py {
         let span = self.span();
         match self {
@@ -5599,8 +5660,8 @@ impl Convert for js::TsParamPropParam {
                     }));
                 }
                 WithStmts {
-                    expr: (
-                        py::ParameterWithDefault {
+                    expr: Param {
+                        param: py::ParameterWithDefault {
                             range: span.convert(state),
                             default: None,
                             parameter: py::Parameter {
@@ -5609,8 +5670,9 @@ impl Convert for js::TsParamPropParam {
                                 annotation: ann.map(Box::new),
                             },
                         },
-                        vec![],
-                    ),
+                        body_stmts: vec![],
+                        is_rest: false,
+                    },
                     stmts,
                 }
             }
@@ -5620,9 +5682,10 @@ impl Convert for js::TsParamPropParam {
                     type_ann,
                     body_stmts,
                     def_val,
+                    is_rest,
                 } = x;
-                (
-                    py::ParameterWithDefault {
+                Param {
+                    param: py::ParameterWithDefault {
                         range: span.convert(state),
                         default: def_val.map(Box::new),
                         parameter: py::Parameter {
@@ -5632,7 +5695,8 @@ impl Convert for js::TsParamPropParam {
                         },
                     },
                     body_stmts,
-                )
+                    is_rest,
+                }
             }),
         }
     }
