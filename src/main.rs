@@ -1665,17 +1665,11 @@ impl Convert for js::CondExpr {
         } = (*alt).convert(state);
         if stmts2.is_empty() && stmts3.is_empty() {
             return WithStmts {
-                expr: py::Expr::BoolOp(py::ExprBoolOp {
+                expr: py::Expr::If(py::ExprIf {
                     range: span.convert(state),
-                    op: py::BoolOp::And,
-                    values: vec![
-                        py::Expr::BoolOp(py::ExprBoolOp {
-                            range: span.convert(state),
-                            op: py::BoolOp::And,
-                            values: vec![test, cons],
-                        }),
-                        alt,
-                    ],
+                    test: Box::new(test),
+                    body: Box::new(cons),
+                    orelse: Box::new(alt),
                 }),
                 stmts,
             };
