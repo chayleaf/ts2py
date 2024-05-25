@@ -2915,13 +2915,9 @@ impl Convert for js::TsTupleType {
             expr: py::Expr::Subscript(py::ExprSubscript {
                 range: span.convert(state),
                 ctx: py::ExprContext::Load,
-                value: Box::new(py::Expr::Attribute(py::ExprAttribute {
-                    range: span.convert(state),
-                    value: Box::new(state.import("typing")),
-                    attr: py::Identifier {
-                        range: TextRange::default(),
-                        id: "Tuple".to_owned(),
-                    },
+                value: Box::new(py::Expr::Name(py::ExprName {
+                    range: TextRange::default(),
+                    id: "tuple".to_owned(),
                     ctx: py::ExprContext::Load,
                 })),
                 slice: Box::new(py::Expr::Tuple(py::ExprTuple {
@@ -2960,13 +2956,9 @@ impl Convert for js::TsArrayType {
             expr: py::Expr::Subscript(py::ExprSubscript {
                 range: span.convert(state),
                 ctx: py::ExprContext::Load,
-                value: Box::new(py::Expr::Attribute(py::ExprAttribute {
-                    range: span.convert(state),
-                    value: Box::new(state.import("typing")),
-                    attr: py::Identifier {
-                        range: TextRange::default(),
-                        id: "List".to_owned(),
-                    },
+                value: Box::new(py::Expr::Name(py::ExprName {
+                    range: TextRange::default(),
+                    id: "list".to_owned(),
                     ctx: py::ExprContext::Load,
                 })),
                 slice: Box::new((*elem_type).convert(state).unwrap_into(&mut stmts)),
