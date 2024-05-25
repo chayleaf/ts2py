@@ -71,16 +71,20 @@ impl<T: Convert> Convert for Box<T> {
 }
 
 fn safe_name(s: &str) -> String {
-    let mut s = (if matches!(s.chars().next(), Some(c) if unicode_ident::is_xid_start(c) || !unicode_ident::is_xid_continue(c)) {
-        None
-    } else {
-        Some('_')
+    let mut s = (match s.chars().next() {
+        Some(c) if unicode_ident::is_xid_start(c) || !unicode_ident::is_xid_continue(c) => None,
+        Some('_') => None,
+        _ => Some('_'),
     })
     .into_iter()
     .chain(s.chars())
     .enumerate()
     .map(|(i, x)| {
-        if if i == 0 { unicode_ident::is_xid_start(x) } else { unicode_ident::is_xid_continue(x) } {
+        if if i == 0 {
+            x == '_' || unicode_ident::is_xid_start(x)
+        } else {
+            x == '_' || unicode_ident::is_xid_continue(x)
+        } {
             x
         } else {
             '_'
@@ -5068,7 +5072,17 @@ fn main() {
     for path in paths {
         let script_path = path.strip_prefix("a").unwrap();
         let stem = path.file_stem().unwrap().to_str().unwrap();
-        let stem = if stem == "index" { "" } else { stem };
+        let mut script_dir = script_path.to_path_buf();
+        script_dir.pop();
+        let stem = if stem == "index" {
+            if flatten_dirs.contains(&script_dir) {
+                ""
+            } else {
+                "__init__"
+            }
+        } else {
+            stem
+        };
         let ext = path.extension().unwrap();
         let out_path = PathBuf::new().join("b").join(PathBuf::from(
             convert_import_path(script_path, stem, &flatten_dirs)
