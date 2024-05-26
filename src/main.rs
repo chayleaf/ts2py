@@ -3164,27 +3164,38 @@ impl Convert for js::TsLitType {
 
 impl Convert for js::TsLit {
     type Py = WithStmts<py::Expr>;
-    fn convert(self, state: &State) -> Self::Py {
-        match self {
-            Self::Number(x) => py::Expr::NumberLiteral(py::ExprNumberLiteral {
-                range: x.span.convert(state),
-                value: x.convert(state),
-            })
-            .into(),
-            Self::Bool(js::Bool { span, value }) => {
-                py::Expr::BooleanLiteral(py::ExprBooleanLiteral {
-                    range: span.convert(state),
-                    value,
-                })
-                .into()
-            }
-            Self::Str(s) => py::Expr::StringLiteral(py::ExprStringLiteral {
-                range: s.span.convert(state),
-                value: s.convert(state),
-            })
-            .into(),
-            x => todo!("{x:?}"),
-        }
+    fn convert2(self, state: &State, ctx: py::ExprContext) -> Self::Py {
+        py::Expr::Subscript(py::ExprSubscript {
+            range: self.span().convert(state),
+            value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                range: TextRange::default(),
+                value: Box::new(state.import("typing")),
+                attr: py::Identifier {
+                    range: TextRange::default(),
+                    id: "Literal".to_owned(),
+                },
+                ctx: py::ExprContext::Load,
+            })),
+            slice: Box::new(match self {
+                Self::Number(x) => py::Expr::NumberLiteral(py::ExprNumberLiteral {
+                    range: x.span.convert(state),
+                    value: x.convert(state),
+                }),
+                Self::Bool(js::Bool { span, value }) => {
+                    py::Expr::BooleanLiteral(py::ExprBooleanLiteral {
+                        range: span.convert(state),
+                        value,
+                    })
+                }
+                Self::Str(s) => py::Expr::StringLiteral(py::ExprStringLiteral {
+                    range: s.span.convert(state),
+                    value: s.convert(state),
+                }),
+                x => todo!("{x:?}"),
+            }),
+            ctx,
+        })
+        .into()
     }
 }
 
