@@ -1616,8 +1616,9 @@ impl Convert for js::Regex {
                                 value: Box::new(state.import("re")),
                                 attr: py::Identifier::new(
                                     match c {
-                                        'i' => "I",
-                                        'g' => "G",
+                                        'i' => 'I',
+                                        'g' => 'G',
+                                        'u' => 'U',
                                         x => todo!("{x:?}"),
                                     },
                                     TextRange::default(),
@@ -5226,14 +5227,39 @@ impl Convert for js::Stmt {
             Self::While(stmt) => stmt.convert(state),
             Self::DoWhile(stmt) => stmt.convert(state),
             Self::Empty(stmt) => stmt.convert(state),
+            Self::Labeled(stmt) => stmt.convert(state),
             s => todo!("{s:?}"),
         }
+    }
+}
+
+impl Convert for js::LabeledStmt {
+    type Py = Vec<py::Stmt>;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self { span, label, body } = self;
+        let mut body = (*body).convert(state);
+        body.insert(
+            0,
+            py::Stmt::Expr(py::StmtExpr {
+                range: span.convert(state),
+                value: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
+                    range: TextRange::default(),
+                    value: py::StringLiteralValue::single(py::StringLiteral {
+                        range: TextRange::default(),
+                        value: format!("label {label}").into(),
+                        flags: Default::default(),
+                    }),
+                })),
+            }),
+        );
+        body
     }
 }
 
 impl Convert for js::EmptyStmt {
     type Py = Vec<py::Stmt>;
     fn convert(self, _state: &State) -> Self::Py {
+        let Self { span: _ } = self;
         vec![]
     }
 }
@@ -5298,7 +5324,7 @@ impl Convert for js::CatchClause {
                     range: span.convert(state),
                     type_: None,
                     name: None,
-                    body,
+                    body: safe_block(body),
                 })
             },
             stmts,
@@ -5310,10 +5336,24 @@ impl Convert for js::ContinueStmt {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         let Self { span, label } = self;
-        assert!(label.is_none());
-        vec![py::Stmt::Continue(py::StmtContinue {
+        let mut ret = Vec::with_capacity(1 + usize::from(label.is_some()));
+        if let Some(label) = label {
+            ret.push(py::Stmt::Expr(py::StmtExpr {
+                range: span.convert(state),
+                value: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
+                    range: TextRange::default(),
+                    value: py::StringLiteralValue::single(py::StringLiteral {
+                        range: TextRange::default(),
+                        value: format!("continue label: {label}").into(),
+                        flags: Default::default(),
+                    }),
+                })),
+            }));
+        }
+        ret.push(py::Stmt::Continue(py::StmtContinue {
             range: span.convert(state),
-        })]
+        }));
+        ret
     }
 }
 
@@ -5321,10 +5361,24 @@ impl Convert for js::BreakStmt {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         let Self { span, label } = self;
-        assert!(label.is_none());
-        vec![py::Stmt::Break(py::StmtBreak {
+        let mut ret = Vec::with_capacity(1 + usize::from(label.is_some()));
+        if let Some(label) = label {
+            ret.push(py::Stmt::Expr(py::StmtExpr {
+                range: span.convert(state),
+                value: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
+                    range: TextRange::default(),
+                    value: py::StringLiteralValue::single(py::StringLiteral {
+                        range: TextRange::default(),
+                        value: format!("break label: {label}").into(),
+                        flags: Default::default(),
+                    }),
+                })),
+            }));
+        }
+        ret.push(py::Stmt::Break(py::StmtBreak {
             range: span.convert(state),
-        })]
+        }));
+        ret
     }
 }
 
@@ -5370,7 +5424,7 @@ impl Convert for js::ForStmt {
         stmts.push(py::Stmt::While(py::StmtWhile {
             range: span.convert(state),
             test: Box::new(test),
-            body,
+            body: safe_block(body),
             orelse: vec![],
         }));
         stmts
@@ -5403,7 +5457,7 @@ impl Convert for js::DoWhileStmt {
                 range: TextRange::default(),
                 value: true,
             })),
-            body,
+            body: safe_block(body),
             orelse: vec![],
         }));
         stmts
@@ -5425,7 +5479,7 @@ impl Convert for js::WhileStmt {
         stmts.push(py::Stmt::While(py::StmtWhile {
             range: span.convert(state),
             test: Box::new(test),
-            body,
+            body: safe_block(body),
             orelse: vec![],
         }));
         stmts
@@ -5464,7 +5518,7 @@ impl Convert for js::ForInStmt {
             range: span.convert(state),
             is_async: false,
             target: Box::new(target),
-            body,
+            body: safe_block(body),
             iter: Box::new((*right).convert(state).unwrap_into(&mut stmts)),
             orelse: vec![],
         });
@@ -5490,7 +5544,7 @@ impl Convert for js::ForOfStmt {
             range: span.convert(state),
             is_async: is_await,
             target: Box::new(target),
-            body,
+            body: safe_block(body),
             iter: Box::new((*right).convert(state).unwrap_into(&mut stmts)),
             orelse: vec![],
         });
@@ -6073,6 +6127,14 @@ fn main() {
         .unwrap_or_else(|err| {
             eprintln!("{module:?}");
             eprintln!("{code}");
+            eprintln!(
+                "error location: {}",
+                match &err {
+                    ruff_python_formatter::FormatModuleError::ParseError(x) =>
+                        &code[x.location.range()],
+                    _ => "?",
+                }
+            );
             panic!("{err}");
         });
         let mut out = fs::File::create(&out_path).unwrap();
