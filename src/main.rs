@@ -136,7 +136,7 @@ fn resolve_name(
                 attr: py::Identifier::new("abc", TextRange::default()),
                 ctx: py::ExprContext::Load,
             })),
-            attr: py::Identifier::new("Coroutine", TextRange::default()),
+            attr: py::Identifier::new("Awaitable", TextRange::default()),
             ctx,
         }),
         "Iterator" => py::Expr::Attribute(py::ExprAttribute {
@@ -1663,11 +1663,11 @@ impl Convert for js::ArrayLit {
     }
 }
 
-fn strip_coroutine(is_async: bool, typ: py::Expr) -> py::Expr {
-    if !is_async {
-        return typ;
+fn strip_awaitable(is_async: Option<bool>, typ: py::Expr) -> (bool, py::Expr) {
+    if let Some(false) = is_async {
+        return (false, typ);
     }
-    let ret = typ.clone();
+    let ret = (is_async.unwrap_or_default(), typ.clone());
     let py::Expr::Subscript(py::ExprSubscript {
         range: _,
         value,
@@ -1686,7 +1686,7 @@ fn strip_coroutine(is_async: bool, typ: py::Expr) -> py::Expr {
     else {
         return ret;
     };
-    if &attr.id != "Coroutine" {
+    if &attr.id != "Awaitable" {
         return ret;
     }
     let py::Expr::Attribute(py::ExprAttribute {
@@ -1718,8 +1718,8 @@ fn strip_coroutine(is_async: bool, typ: py::Expr) -> py::Expr {
             elts,
             ctx: _,
             parenthesized: _,
-        }) => elts.into_iter().next().unwrap(),
-        x => x,
+        }) => (true, elts.into_iter().next().unwrap()),
+        x => (true, x),
     }
 }
 
@@ -1742,10 +1742,13 @@ fn convert_func(
     let mut body_stmts = vec![];
     let mut ret_stmts = vec![];
     let returns = return_type.map(|x| {
-        Box::new(strip_coroutine(
-            is_async,
-            (*x).convert(state).unwrap_into(&mut ret_stmts),
-        ))
+        Box::new(
+            strip_awaitable(
+                Some(is_async),
+                (*x).convert(state).unwrap_into(&mut ret_stmts),
+            )
+            .1,
+        )
     });
     let type_params =
         type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut ret_stmts)));
@@ -1882,12 +1885,40 @@ impl Convert for js::ArrowExpr {
                 }),
                 stmts,
             }
+        } else if body_stmts.len() == 1
+            && body_stmts[0].is_return_stmt()
+            && expr.is_none()
+            && !is_async
+            && !is_generator
+        {
+            let body = body_stmts
+                .into_iter()
+                .next()
+                .unwrap()
+                .expect_return_stmt()
+                .value
+                .unwrap_or_else(|| {
+                    Box::new(py::Expr::NoneLiteral(py::ExprNoneLiteral {
+                        range: TextRange::default(),
+                    }))
+                });
+            // lambdas cant have type params
+            for arg in &mut parameters.args {
+                arg.parameter.annotation = None;
+            }
+            WithStmts {
+                expr: py::Expr::Lambda(py::ExprLambda {
+                    range: span.convert(state),
+                    body,
+                    parameters: Some(Box::new(safe_params(parameters))),
+                }),
+                stmts,
+            }
         } else {
             let returns = return_type.map(|x| {
-                Box::new(strip_coroutine(
-                    is_async,
-                    (*x).convert(state).unwrap_into(&mut stmts),
-                ))
+                Box::new(
+                    strip_awaitable(Some(is_async), (*x).convert(state).unwrap_into(&mut stmts)).1,
+                )
             });
             if let Some(expr) = expr {
                 body_stmts.push(py::Stmt::Return(py::StmtReturn {
@@ -1907,7 +1938,7 @@ impl Convert for js::ArrowExpr {
                     .map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
             });
             stmts.push(ret);
-            stmts.into()
+            dbg!(stmts.into())
         }
     }
 }
@@ -4918,12 +4949,18 @@ impl Convert for js::TsMethodSignature {
             type_params,
         } = self;
         let mut stmts = vec![];
-        let returns = type_ann.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts)));
+        let mut is_async = false;
+        let returns = type_ann.map(|x| {
+            let (is_async2, expr) =
+                strip_awaitable(None, (*x).convert(state).unwrap_into(&mut stmts));
+            is_async = is_async2;
+            Box::new(expr)
+        });
         let type_params =
             type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts)));
         WithStmts {
             expr: py::StmtFunctionDef {
-                is_async: false,
+                is_async,
                 range: span.convert(state),
                 name: match *key {
                     js::Expr::Ident(x) => x.convert(state),
@@ -5165,14 +5202,17 @@ impl Convert for js::VarDecl {
                 assert!(!is_rest);
                 let init = init.map(|x| (*x).convert(state).unwrap_into(&mut stmts));
                 if stmts.len() == 1
-                    && matches!(stmts[0], py::Stmt::ClassDef(_) | py::Stmt::FunctionDef(_))
+                    && match &stmts[0] {
+                        py::Stmt::ClassDef(x) => Some(&x.name.id),
+                        py::Stmt::FunctionDef(x) => Some(&x.name.id),
+                        _ => None,
+                    } == init.as_ref().and_then(|x| x.as_name_expr()).map(|x| &x.id)
                 {
                     match &mut stmts[0] {
                         py::Stmt::ClassDef(x) => x.name = id,
                         py::Stmt::FunctionDef(x) => x.name = id,
                         x => todo!("{x:?}"),
                     }
-                    return stmts;
                 } else if let Some(typ) = type_ann {
                     stmts.push(py::Stmt::AnnAssign(py::StmtAnnAssign {
                         range: span.convert(state),
@@ -5984,6 +6024,8 @@ fn main() {
 
     let mut paths = Vec::new();
 
+    let force = std::env::args().nth(1).as_deref() == Some("-f");
+
     for entry in walkdir::WalkDir::new("a") {
         let Ok(entry) = entry else { continue };
         let Ok(meta) = entry.metadata() else { continue };
@@ -6075,7 +6117,7 @@ fn main() {
                 .replace('.', "/")
                 + ".py",
         ));
-        if out_path.exists() {
+        if !force && out_path.exists() {
             continue;
         }
         if let Some(parent) = out_path.parent() {
