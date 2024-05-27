@@ -847,8 +847,17 @@ impl Convert for js::ExportDecl {
     }
 }
 
-fn expr_stmt(e: py::Expr) -> py::Stmt {
+fn likely_to_have_side_effects(e: &py::Expr) -> bool {
     match e {
+        py::Expr::Named(_) => false,
+        py::Expr::Attribute(x) => likely_to_have_side_effects(&x.value),
+        py::Expr::Subscript(x) => likely_to_have_side_effects(&x.value),
+        _ => true,
+    }
+}
+
+fn expr_stmt(e: py::Expr) -> Option<py::Stmt> {
+    likely_to_have_side_effects(&e).then(|| match e {
         py::Expr::Named(py::ExprNamed {
             range,
             target,
@@ -862,7 +871,7 @@ fn expr_stmt(e: py::Expr) -> py::Stmt {
             range: TextRange::default(),
             value: Box::new(x),
         }),
-    }
+    })
 }
 
 impl Convert for js::ModuleItem {
@@ -1938,7 +1947,7 @@ impl Convert for js::ArrowExpr {
                     .map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
             });
             stmts.push(ret);
-            dbg!(stmts.into())
+            stmts.into()
         }
     }
 }
@@ -3849,9 +3858,7 @@ impl Convert for js::ExprStmt {
     fn convert(self, state: &State) -> Self::Py {
         let Self { span: _, expr } = self;
         let WithStmts { expr, mut stmts } = (*expr).convert(state);
-        if !expr.is_name_expr() && !expr.is_attribute_expr() && !expr.is_subscript_expr() {
-            stmts.push(expr_stmt(expr));
-        }
+        stmts.extend(expr_stmt(expr));
         stmts
     }
 }
@@ -5440,9 +5447,7 @@ impl Convert for js::ForStmt {
         if let Some(upd) = update {
             let WithStmts { expr, stmts } = (*upd).convert(state);
             body.extend(stmts);
-            if !expr.is_name_expr() && !expr.is_attribute_expr() && !expr.is_subscript_expr() {
-                body.push(expr_stmt(expr));
-            }
+            body.extend(expr_stmt(expr));
         }
         let test = test.map_or_else(
             || {
@@ -5533,9 +5538,7 @@ impl Convert for js::VarDeclOrExpr {
             Self::VarDecl(x) => (*x).convert(state),
             Self::Expr(x) => {
                 let WithStmts { expr, mut stmts } = (*x).convert(state);
-                if !expr.is_name_expr() && !expr.is_attribute_expr() && !expr.is_subscript_expr() {
-                    stmts.push(expr_stmt(expr));
-                }
+                stmts.extend(expr_stmt(expr));
                 stmts
             }
         }
@@ -6167,7 +6170,7 @@ fn main() {
             ruff_python_formatter::PyFormatOptions::default(),
         )
         .unwrap_or_else(|err| {
-            eprintln!("{module:?}");
+            eprintln!("{module:#?}");
             eprintln!("{code}");
             eprintln!(
                 "error location: {}",
