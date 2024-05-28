@@ -299,10 +299,14 @@ fn safe_params(params: py::Parameters) -> py::Parameters {
                 } else {
                     match arg.parameter.annotation.as_deref() {
                         Some(py::Expr::Subscript(py::ExprSubscript { value, .. }))
-                            if matches!(&**value, py::Expr::Name(py::ExprName {
+                            if matches!(&**value, py::Expr::Attribute(py::ExprAttribute {
+                            attr,
+                            value,
+                            ..
+                        }) if attr.id == "Optional" && matches!(&**value, py::Expr::Name(py::ExprName {
                             id,
                             ..
-                        }) if id == "Optional") =>
+                        }) if id == "typing")) =>
                         {
                             arg.default =
                                 Some(Box::new(py::Expr::NoneLiteral(py::ExprNoneLiteral {
@@ -3298,75 +3302,21 @@ impl Convert for js::TsFnOrConstructorType {
 
 impl Convert for js::TsConstructorType {
     type Py = WithStmts<py::Expr>;
-    fn convert(self, state: &State) -> Self::Py {
+    fn convert2(self, state: &State, ctx: py::ExprContext) -> Self::Py {
         let Self {
             span,
             params,
-            type_params: _,
+            type_params,
             type_ann,
             is_abstract: _,
         } = self;
-        let mut stmts = vec![];
-        WithStmts {
-            expr: py::Expr::Subscript(py::ExprSubscript {
-                range: span.convert(state),
-                value: Box::new(py::Expr::Attribute(py::ExprAttribute {
-                    range: span.convert(state),
-                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
-                        range: span.convert(state),
-                        value: Box::new(state.import("collections")),
-                        attr: py::Identifier {
-                            range: TextRange::default(),
-                            id: "abc".to_owned(),
-                        },
-                        ctx: py::ExprContext::Load,
-                    })),
-                    attr: py::Identifier {
-                        range: TextRange::default(),
-                        id: "Callable".to_owned(),
-                    },
-                    ctx: py::ExprContext::Load,
-                })),
-                slice: Box::new(py::Expr::Tuple(py::ExprTuple {
-                    range: TextRange::default(),
-                    parenthesized: false,
-                    ctx: py::ExprContext::Load,
-                    elts: vec![
-                        py::Expr::List(py::ExprList {
-                            range: TextRange::default(),
-                            ctx: py::ExprContext::Load,
-                            elts: params
-                                .into_iter()
-                                .map(|x| match x.convert(state).unwrap_into(&mut stmts) {
-                                    PyParameter::Single(x) => x.parameter.annotation.map_or_else(
-                                        || {
-                                            py::Expr::Attribute(py::ExprAttribute {
-                                                range: span.convert(state),
-                                                value: Box::new(state.import("typing")),
-                                                attr: py::Identifier {
-                                                    range: TextRange::default(),
-                                                    id: "Any".to_owned(),
-                                                },
-                                                ctx: py::ExprContext::Load,
-                                            })
-                                        },
-                                        |x| *x,
-                                    ),
-                                    PyParameter::Rest(_) => {
-                                        py::Expr::EllipsisLiteral(py::ExprEllipsisLiteral {
-                                            range: TextRange::default(),
-                                        })
-                                    }
-                                })
-                                .collect(),
-                        }),
-                        (*type_ann).convert(state).unwrap_into(&mut stmts),
-                    ],
-                })),
-                ctx: py::ExprContext::Load,
-            }),
-            stmts,
-        }
+        (js::TsFnType {
+            span,
+            params,
+            type_params,
+            type_ann,
+        })
+        .convert2(state, ctx)
     }
 }
 
@@ -5070,14 +5020,14 @@ fn create_params(params: impl Iterator<Item = PyParameter>) -> py::Parameters {
             PyParameter::Rest(x) => vararg = Some(Box::new(x)),
         }
     }
-    py::Parameters {
+    safe_params(py::Parameters {
         range: TextRange::default(),
         posonlyargs: vec![],
         args,
         vararg,
         kwonlyargs: vec![],
         kwarg: None,
-    }
+    })
 }
 
 enum PyParameter {
