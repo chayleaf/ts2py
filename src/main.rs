@@ -72,12 +72,15 @@ impl<T: Convert> Convert for Box<T> {
 
 fn safe_name(state: &State, s: &str) -> String {
     let s = if state.cfg.camel_to_snake && matches!(s.chars().next(), Some(c) if c.is_lowercase()) {
+        let mut last_upper = false;
         s.chars()
             .flat_map(|x| {
-                x.is_uppercase()
+                let ret = (x.is_uppercase() && !last_upper)
                     .then_some('_')
                     .into_iter()
-                    .chain(x.to_lowercase())
+                    .chain(x.to_lowercase());
+                last_upper = x.is_uppercase();
+                ret
             })
             .collect()
     } else {
