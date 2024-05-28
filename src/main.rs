@@ -5229,11 +5229,17 @@ impl Convert for js::VarDecl {
                 assert!(!is_rest);
                 let init = init.map(|x| (*x).convert(state).unwrap_into(&mut stmts));
                 if stmts.len() == 1
-                    && match &stmts[0] {
-                        py::Stmt::ClassDef(x) => Some(&x.name.id),
-                        py::Stmt::FunctionDef(x) => Some(&x.name.id),
-                        _ => None,
-                    } == init.as_ref().and_then(|x| x.as_name_expr()).map(|x| &x.id)
+                    && matches!(
+                        (
+                            init.as_ref().and_then(|x| x.as_name_expr()).map(|x| &x.id),
+                            match &stmts[0] {
+                                py::Stmt::ClassDef(x) => Some(&x.name.id),
+                                py::Stmt::FunctionDef(x) => Some(&x.name.id),
+                                _ => None,
+                            }
+                        ),
+                        (Some(a), Some(b)) if a == b
+                    )
                 {
                     match &mut stmts[0] {
                         py::Stmt::ClassDef(x) => x.name = id,
