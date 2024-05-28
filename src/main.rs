@@ -71,7 +71,9 @@ impl<T: Convert> Convert for Box<T> {
 }
 
 fn safe_name(state: &State, s: &str) -> String {
-    let s = if state.cfg.camel_to_snake && matches!(s.chars().next(), Some(c) if c.is_lowercase()) {
+    let s = if state.cfg.camel_to_snake
+        && matches!(s.chars().find(|c| *c != '_'), Some(c) if c.is_lowercase())
+    {
         let mut last_upper = false;
         s.chars()
             .flat_map(|x| {
@@ -869,7 +871,7 @@ impl Convert for js::ExportDecl {
 
 fn likely_to_have_side_effects(e: &py::Expr) -> bool {
     match e {
-        py::Expr::Named(_) => false,
+        py::Expr::Name(_) => false,
         py::Expr::Attribute(x) => likely_to_have_side_effects(&x.value),
         py::Expr::Subscript(x) => likely_to_have_side_effects(&x.value),
         _ => true,
@@ -1692,9 +1694,6 @@ impl Convert for js::ArrayLit {
 }
 
 fn strip_awaitable(is_async: Option<bool>, typ: py::Expr) -> (bool, py::Expr) {
-    if let Some(false) = is_async {
-        return (false, typ);
-    }
     let ret = (is_async.unwrap_or_default(), typ.clone());
     let py::Expr::Subscript(py::ExprSubscript {
         range: _,
@@ -1762,7 +1761,7 @@ fn convert_func(
         span,
         body,
         is_generator,
-        is_async,
+        mut is_async,
         return_type,
         type_params,
     } = function;
@@ -1770,13 +1769,12 @@ fn convert_func(
     let mut body_stmts = vec![];
     let mut ret_stmts = vec![];
     let returns = return_type.map(|x| {
-        Box::new(
-            strip_awaitable(
-                Some(is_async),
-                (*x).convert(state).unwrap_into(&mut ret_stmts),
-            )
-            .1,
-        )
+        let (is_async2, ret) = strip_awaitable(
+            Some(is_async),
+            (*x).convert(state).unwrap_into(&mut ret_stmts),
+        );
+        is_async = is_async2;
+        Box::new(ret)
     });
     let type_params =
         type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut ret_stmts)));
@@ -1812,7 +1810,19 @@ fn convert_func(
                 kwarg: None,
             })),
             body: {
-                body_stmts.extend(body.convert(state).unwrap_or_default());
+                if let Some(body) = body {
+                    body_stmts.extend(body.convert(state));
+                } else {
+                    body_stmts.push(py::Stmt::Raise(py::StmtRaise {
+                        range: TextRange::default(),
+                        exc: Some(Box::new(py::Expr::Name(py::ExprName {
+                            ctx: py::ExprContext::Load,
+                            range: TextRange::default(),
+                            id: "NotImplementedError".to_owned(),
+                        }))),
+                        cause: None,
+                    }));
+                }
                 safe_block(body_stmts)
             },
             decorator_list: decorators
@@ -1844,7 +1854,7 @@ impl Convert for js::ArrowExpr {
             params,
             body,
             type_params,
-            is_async,
+            mut is_async,
             is_generator,
             return_type,
         } = self;
@@ -1899,6 +1909,12 @@ impl Convert for js::ArrowExpr {
                 None
             }
         };
+        let returns = return_type.map(|x| {
+            let (is_async2, ret) =
+                strip_awaitable(Some(is_async), (*x).convert(state).unwrap_into(&mut stmts));
+            is_async = is_async2;
+            Box::new(ret)
+        });
         if body_stmts.is_empty() && expr.is_some() && !is_async && !is_generator {
             let expr = expr.unwrap();
             // lambdas cant have type params
@@ -1943,11 +1959,6 @@ impl Convert for js::ArrowExpr {
                 stmts,
             }
         } else {
-            let returns = return_type.map(|x| {
-                Box::new(
-                    strip_awaitable(Some(is_async), (*x).convert(state).unwrap_into(&mut stmts)).1,
-                )
-            });
             if let Some(expr) = expr {
                 body_stmts.push(py::Stmt::Return(py::StmtReturn {
                     range: expr.range(),
@@ -3755,35 +3766,44 @@ impl Convert for js::TsUnionType {
     fn convert(self, state: &State) -> Self::Py {
         let Self { span, types } = self;
         let mut stmts = vec![];
+        let mut types = types
+            .into_iter()
+            .map(|x| (*x).convert(state).unwrap_into(&mut stmts));
+        let first = types.next().unwrap();
+        let mut range = Some(span.convert(state));
+        let mut opt = false;
+        let expr = types.fold(first, |exp, ty| {
+            if ty.is_none_literal_expr() {
+                opt = true;
+                exp
+            } else {
+                py::Expr::BinOp(py::ExprBinOp {
+                    range: range.take().unwrap_or_default(),
+                    left: Box::new(exp),
+                    op: py::Operator::BitOr,
+                    right: Box::new(ty),
+                })
+            }
+        });
         HopefullyExpr {
-            expr: py::Expr::Subscript(py::ExprSubscript {
-                range: span.convert(state),
-                ctx: py::ExprContext::Load,
-                value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+            expr: if opt {
+                py::Expr::Subscript(py::ExprSubscript {
                     range: span.convert(state),
-                    value: Box::new(state.import("typing")),
-                    attr: py::Identifier {
-                        range: TextRange::default(),
-                        id: "Union".to_owned(),
-                    },
                     ctx: py::ExprContext::Load,
-                })),
-                slice: Box::new(if types.len() == 1 {
-                    (*types.into_iter().next().unwrap())
-                        .convert(state)
-                        .unwrap_into(&mut stmts)
-                } else {
-                    py::Expr::Tuple(py::ExprTuple {
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
                         range: span.convert(state),
+                        value: Box::new(state.import("typing")),
+                        attr: py::Identifier {
+                            range: TextRange::default(),
+                            id: "Optional".to_owned(),
+                        },
                         ctx: py::ExprContext::Load,
-                        parenthesized: false,
-                        elts: types
-                            .into_iter()
-                            .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
-                            .collect(),
-                    })
-                }),
-            }),
+                    })),
+                    slice: Box::new(expr),
+                })
+            } else {
+                expr
+            },
             stmts,
         }
     }
@@ -4357,6 +4377,16 @@ impl Convert for js::Constructor {
                 body: {
                     if let Some(body) = body {
                         body_stmts.extend(body.convert(state));
+                    } else {
+                        body_stmts.push(py::Stmt::Raise(py::StmtRaise {
+                            range: TextRange::default(),
+                            exc: Some(Box::new(py::Expr::Name(py::ExprName {
+                                ctx: py::ExprContext::Load,
+                                range: TextRange::default(),
+                                id: "NotImplementedError".to_owned(),
+                            }))),
+                            cause: None,
+                        }));
                     }
                     safe_block(body_stmts)
                 },
@@ -4977,10 +5007,10 @@ impl Convert for js::TsMethodSignature {
         let mut stmts = vec![];
         let mut is_async = false;
         let returns = type_ann.map(|x| {
-            let (is_async2, expr) =
+            let (is_async2, ret) =
                 strip_awaitable(None, (*x).convert(state).unwrap_into(&mut stmts));
             is_async = is_async2;
-            Box::new(expr)
+            Box::new(ret)
         });
         let type_params =
             type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts)));
@@ -5896,14 +5926,35 @@ impl Convert for js::TsParamProp {
     type Py = WithStmts<Param>;
     fn convert(self, state: &State) -> Self::Py {
         let Self {
-            span: _,
-            decorators: _,
+            span,
+            decorators,
             accessibility: _,
             is_override: _,
             readonly: _,
             param,
         } = self;
-        param.convert(state)
+        assert!(decorators.is_empty());
+        let mut ret = param.convert(state);
+        let name = ret.expr.param.parameter.name.clone();
+        ret.expr.body_stmts.push(py::Stmt::Assign(py::StmtAssign {
+            range: span.convert(state),
+            targets: vec![py::Expr::Attribute(py::ExprAttribute {
+                range: TextRange::default(),
+                value: Box::new(py::Expr::Name(py::ExprName {
+                    range: span.convert(state),
+                    id: "self".to_owned(),
+                    ctx: py::ExprContext::Load,
+                })),
+                attr: name.clone(),
+                ctx: py::ExprContext::Store,
+            })],
+            value: Box::new(py::Expr::Name(py::ExprName {
+                range: TextRange::default(),
+                id: name.id,
+                ctx: py::ExprContext::Load,
+            })),
+        }));
+        ret
     }
 }
 impl Convert for js::TsParamPropParam {
