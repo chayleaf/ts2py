@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use dashmap::DashSet;
@@ -47,7 +47,7 @@ impl Convert for js::Ident {
         } = self;
         py::Identifier {
             range: span.convert(state),
-            id: safe_name(sym.as_str()),
+            id: safe_name(state, sym.as_str()),
         }
     }
 }
@@ -70,7 +70,19 @@ impl<T: Convert> Convert for Box<T> {
     }
 }
 
-fn safe_name(s: &str) -> String {
+fn safe_name(state: &State, s: &str) -> String {
+    let s = if state.cfg.camel_to_snake {
+        s.chars()
+            .flat_map(|x| {
+                x.is_uppercase()
+                    .then_some('_')
+                    .into_iter()
+                    .chain(x.to_lowercase())
+            })
+            .collect()
+    } else {
+        s.to_owned()
+    };
     let mut s = (match s.chars().next() {
         Some(c) if unicode_ident::is_xid_start(c) || !unicode_ident::is_xid_continue(c) => None,
         Some('_') => None,
@@ -103,7 +115,7 @@ fn safe_name(s: &str) -> String {
     s
 }
 
-fn rewrite_name(s: &str) -> String {
+fn rewrite_name(state: &State, s: &str) -> String {
     match s {
         "Error" => "Exception".to_owned(),
         "RangeError" => "ValueError".to_owned(),
@@ -114,7 +126,7 @@ fn rewrite_name(s: &str) -> String {
         "Array" => "list".to_owned(),
         "Map" | "Record" => "dict".to_owned(),
         "Set" => "set".to_owned(),
-        s => safe_name(s),
+        s => safe_name(state, s),
     }
 }
 
@@ -233,7 +245,7 @@ fn resolve_name(
         }),
         s => py::Expr::Name(py::ExprName {
             range: span.convert(state),
-            id: rewrite_name(s),
+            id: rewrite_name(state, s),
             ctx,
         }),
     }
@@ -322,7 +334,10 @@ impl Convert for js::Module {
                         .iter()
                         .map(|x| py::Alias {
                             range: TextRange::default(),
-                            name: py::Identifier::new(safe_name(x.as_str()), TextRange::default()),
+                            name: py::Identifier::new(
+                                safe_name(state, x.as_str()),
+                                TextRange::default(),
+                            ),
                             asname: None,
                         })
                         .collect(),
@@ -333,8 +348,8 @@ impl Convert for js::Module {
     }
 }
 
-fn convert_import_path(script_path: &Path, src: &str, flatten_dirs: &HashSet<PathBuf>) -> String {
-    let mut path = script_path.to_owned();
+fn convert_import_path(state: &State, src: &str) -> String {
+    let mut path = state.script_path.to_owned();
     path.pop();
     let src = src
         .strip_suffix(".ts")
@@ -354,9 +369,9 @@ fn convert_import_path(script_path: &Path, src: &str, flatten_dirs: &HashSet<Pat
     }
     for comp in path.iter() {
         path2.push(comp);
-        let comp2 = safe_name(comp.to_str().unwrap());
+        let comp2 = safe_name(state, comp.to_str().unwrap());
         ret.push_str(&comp2);
-        if flatten_dirs.contains(&path2) {
+        if state.flatten_dirs.contains(&path2) {
             ret.push('_');
         } else {
             ret.push('.');
@@ -368,11 +383,11 @@ fn convert_import_path(script_path: &Path, src: &str, flatten_dirs: &HashSet<Pat
 
 fn cleanup_import(state: &State, src: &str) -> String {
     if (src.starts_with("./") || src.starts_with("../")) && !src.ends_with(".json") {
-        let conv1 = convert_import_path(&state.script_path, src, &state.flatten_dirs);
+        let conv1 = convert_import_path(state, src);
         let mut parent = state.script_path.clone();
         parent.pop();
         let conv2 = convert_import_path(
-            &state.script_path,
+            state,
             if state.script_path.ends_with("index.js") || state.script_path.ends_with("index.ts") {
                 if state.flatten_dirs.contains(&parent) {
                     "."
@@ -387,7 +402,6 @@ fn cleanup_import(state: &State, src: &str) -> String {
                     .to_str()
                     .unwrap()
             },
-            &state.flatten_dirs,
         );
         let conv2 = conv2
             .split('.')
@@ -408,7 +422,7 @@ fn cleanup_import(state: &State, src: &str) -> String {
             .trim_end_matches(".ts")
             .trim_end_matches('/')
             .split('/')
-            .map(safe_name)
+            .map(|x| safe_name(state, x))
             .fold(String::new(), |mut a, b| {
                 if !a.is_empty() {
                     a.push('.');
@@ -605,7 +619,7 @@ impl Convert for js::ImportDecl {
                                 range: TextRange::default(),
                                 asname: Some(x.local.convert(state)),
                                 name: py::Identifier::new(
-                                    safe_name("default"),
+                                    safe_name(state, "default"),
                                     TextRange::default(),
                                 ),
                             }],
@@ -783,7 +797,10 @@ impl Convert for js::NamedExport {
                     names: vec![py::Alias {
                         range: TextRange::default(),
                         asname: Some(x.exported.convert(state)),
-                        name: py::Identifier::new(safe_name("default"), TextRange::default()),
+                        name: py::Identifier::new(
+                            safe_name(state, "default"),
+                            TextRange::default(),
+                        ),
                     }],
                     level: 0,
                 }),
@@ -926,22 +943,21 @@ impl<T> From<T> for WithStmts<T> {
         }
     }
 }
+#[derive(Copy, Clone, Default)]
+struct Cfg {
+    camel_to_snake: bool,
+    force: bool,
+}
 #[derive(Default)]
 struct State {
     id: AtomicU32,
+    cfg: Cfg,
     py_imports: DashSet<String>,
     js_imports: DashSet<String>,
     script_path: PathBuf,
     flatten_dirs: HashSet<PathBuf>,
 }
 impl State {
-    fn new(script_path: &Path, flatten_dirs: &HashSet<PathBuf>) -> Self {
-        Self {
-            script_path: script_path.to_owned(),
-            flatten_dirs: flatten_dirs.clone(),
-            ..Default::default()
-        }
-    }
     fn gen_name(&self) -> String {
         format!("ts2py_{}", self.id.fetch_add(1, Ordering::Relaxed))
     }
@@ -1062,7 +1078,7 @@ impl Convert for js::ObjectPat {
                         range: TextRange::default(),
                         attr: match key {
                             py::Expr::StringLiteral(x) => {
-                                py::Identifier::new(safe_name(x.value.to_str()), x.range)
+                                py::Identifier::new(safe_name(state, x.value.to_str()), x.range)
                             }
                             x => todo!("{x:?}"),
                         },
@@ -1424,7 +1440,7 @@ impl Convert for js::ArrayPat {
         }
         let value = Box::new(py::Expr::Name(py::ExprName {
             range: id.range,
-            id: safe_name(&id.id),
+            id: safe_name(state, &id.id),
             ctx: py::ExprContext::Load,
         }));
         let target = py::Expr::Tuple(py::ExprTuple {
@@ -1456,7 +1472,7 @@ impl Convert for js::ArrayPat {
                             body_stmts.extend(stmts2);
                             py::Expr::Name(py::ExprName {
                                 range: x.range,
-                                id: safe_name(&x.id),
+                                id: safe_name(state, &x.id),
                                 ctx: py::ExprContext::Store,
                             })
                         },
@@ -3017,7 +3033,7 @@ impl Convert for js::PropOrSpread {
                         ),
                         value: py::Expr::Name(py::ExprName {
                             range: id.span.convert(state),
-                            id: safe_name(id.sym.as_str()),
+                            id: safe_name(state, id.sym.as_str()),
                             ctx: py::ExprContext::Load,
                         }),
                     },
@@ -4004,7 +4020,7 @@ impl Convert for js::TsEnumDecl {
                             range: span.convert(state),
                             targets: vec![py::Expr::Name(py::ExprName {
                                 range: id.range,
-                                id: safe_name(&id.id),
+                                id: safe_name(state, &id.id),
                                 ctx: py::ExprContext::Store,
                             })],
                             value: Box::new(init),
@@ -4452,7 +4468,7 @@ impl Convert for js::ClassProp {
                 let id = x.convert(state);
                 py::Expr::Name(py::ExprName {
                     range: id.range,
-                    id: safe_name(&id.id),
+                    id: safe_name(state, &id.id),
                     ctx: py::ExprContext::Store,
                 })
             }
@@ -4461,7 +4477,7 @@ impl Convert for js::ClassProp {
                     let id = x.convert(state);
                     py::Expr::Name(py::ExprName {
                         range: id.range,
-                        id: safe_name(&id.id),
+                        id: safe_name(state, &id.id),
                         ctx: py::ExprContext::Store,
                     })
                 }
@@ -4785,7 +4801,7 @@ impl Convert for js::TsTypeAliasDecl {
                     range: expr.range(),
                     targets: vec![py::Expr::Name(py::ExprName {
                         range: id.span.convert(state),
-                        id: safe_name(id.sym.as_str()),
+                        id: safe_name(state, id.sym.as_str()),
                         ctx: py::ExprContext::Store,
                     })],
                     value: Box::new(expr),
@@ -4971,9 +4987,10 @@ impl Convert for js::TsMethodSignature {
                 range: span.convert(state),
                 name: match *key {
                     js::Expr::Ident(x) => x.convert(state),
-                    js::Expr::Lit(js::Lit::Str(x)) => {
-                        py::Identifier::new(safe_name(x.value.as_str()), x.span.convert(state))
-                    }
+                    js::Expr::Lit(js::Lit::Str(x)) => py::Identifier::new(
+                        safe_name(state, x.value.as_str()),
+                        x.span.convert(state),
+                    ),
                     x => todo!("{x:?}"),
                 },
                 parameters: Box::new(create_params(
@@ -5225,7 +5242,7 @@ impl Convert for js::VarDecl {
                         range: span.convert(state),
                         target: Box::new(py::Expr::Name(py::ExprName {
                             range: span.convert(state),
-                            id: safe_name(id.as_str()),
+                            id: safe_name(state, id.as_str()),
                             ctx: py::ExprContext::Store,
                         })),
                         simple: true,
@@ -5237,7 +5254,7 @@ impl Convert for js::VarDecl {
                         range: span.convert(state),
                         targets: vec![py::Expr::Name(py::ExprName {
                             range: span.convert(state),
-                            id: safe_name(id.as_str()),
+                            id: safe_name(state, id.as_str()),
                             ctx: py::ExprContext::Store,
                         })],
                         value: Box::new(init.unwrap_or_else(|| {
@@ -5628,7 +5645,7 @@ impl Convert for js::ForHead {
                 (
                     py::Expr::Name(py::ExprName {
                         range: span.convert(state),
-                        id: safe_name(&name.id),
+                        id: safe_name(state, &name.id),
                         ctx: py::ExprContext::Store,
                     }),
                     body_stmts,
@@ -6027,7 +6044,18 @@ fn main() {
 
     let mut paths = Vec::new();
 
-    let force = std::env::args().nth(1).as_deref() == Some("-f");
+    let mut cfg = Cfg::default();
+    if let Some(arg) = std::env::args().nth(1).as_deref() {
+        if arg.starts_with('-') {
+            for char in arg.chars().skip(1) {
+                match char {
+                    'f' => cfg.force = true,
+                    'r' => cfg.camel_to_snake = true,
+                    _ => panic!(),
+                }
+            }
+        }
+    }
 
     for entry in walkdir::WalkDir::new("a") {
         let Ok(entry) = entry else { continue };
@@ -6084,7 +6112,10 @@ fn main() {
                 e.into_diagnostic(&handler).emit();
             })
             .expect("failed to parse module");
-        let state = State::default();
+        let state = State {
+            cfg,
+            ..State::default()
+        };
         let _module = module.convert(&state);
         for import in state.js_imports.iter() {
             let mut import = import.as_str();
@@ -6115,12 +6146,20 @@ fn main() {
         };
         let ext = path.extension().unwrap();
         let out_path = PathBuf::new().join("b").join(PathBuf::from(
-            convert_import_path(script_path, stem, &flatten_dirs)
-                .trim_start_matches('.')
-                .replace('.', "/")
+            convert_import_path(
+                &State {
+                    cfg,
+                    script_path: script_path.to_owned(),
+                    flatten_dirs: flatten_dirs.clone(),
+                    ..State::default()
+                },
+                stem,
+            )
+            .trim_start_matches('.')
+            .replace('.', "/")
                 + ".py",
         ));
-        if !force && out_path.exists() {
+        if !cfg.force && out_path.exists() {
             continue;
         }
         if let Some(parent) = out_path.parent() {
@@ -6152,7 +6191,12 @@ fn main() {
             })
             .expect("failed to parse module");
         // println!("{module:#?}");
-        let module = module.convert(&State::new(script_path, &flatten_dirs));
+        let module = module.convert(&State {
+            cfg,
+            script_path: script_path.to_owned(),
+            flatten_dirs: flatten_dirs.clone(),
+            ..State::default()
+        });
         let locator = ruff_source_file::Locator::new("");
         let stylist = ruff_python_codegen::Stylist::from_tokens(&[], &locator);
         let mut code = String::new();
