@@ -70,8 +70,16 @@ impl<T: Convert> Convert for Box<T> {
     }
 }
 
-fn safe_name(state: &State, s: &str) -> String {
-    let s = if state.cfg.camel_to_snake
+fn str_lit(range: TextRange, s: &str) -> py::StringLiteralValue {
+    py::StringLiteralValue::single(py::StringLiteral {
+        range,
+        value: s.into(),
+        flags: Default::default(),
+    })
+}
+
+fn safeish_name(state: &State, s: &str) -> String {
+    if state.cfg.camel_to_snake
         && matches!(s.chars().find(|c| *c != '_'), Some(c) if c.is_lowercase())
     {
         let mut last_upper = false;
@@ -87,7 +95,11 @@ fn safe_name(state: &State, s: &str) -> String {
             .collect()
     } else {
         s.to_owned()
-    };
+    }
+}
+
+fn safe_name(state: &State, s: &str) -> String {
+    let s = safeish_name(state, s);
     let mut s = (match s.chars().next() {
         Some(c) if unicode_ident::is_xid_start(c) || !unicode_ident::is_xid_continue(c) => None,
         Some('_') => None,
@@ -536,11 +548,7 @@ impl Convert for js::ImportDecl {
                             op: py::Operator::Div,
                             right: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
                                 range: TextRange::default(),
-                                value: py::StringLiteralValue::single(py::StringLiteral {
-                                    range: TextRange::default(),
-                                    value: src.into(),
-                                    flags: Default::default(),
-                                }),
+                                value: str_lit(TextRange::default(), src),
                             })),
                         });
                         let resolved_json_path = py::Expr::Call(py::ExprCall {
@@ -569,11 +577,7 @@ impl Convert for js::ImportDecl {
                                 range: TextRange::default(),
                                 args: Box::new([py::Expr::StringLiteral(py::ExprStringLiteral {
                                     range: TextRange::default(),
-                                    value: py::StringLiteralValue::single(py::StringLiteral {
-                                        range: TextRange::default(),
-                                        value: "rt".into(),
-                                        flags: Default::default(),
-                                    }),
+                                    value: str_lit(TextRange::default(), "rt"),
                                 })]),
                                 keywords: Box::new([]),
                             },
@@ -1040,12 +1044,10 @@ impl Convert for js::ObjectPat {
                 }) => {
                     keys.push(py::Expr::StringLiteral(py::ExprStringLiteral {
                         range: TextRange::default(),
-                        value: js::Str {
-                            span: Default::default(),
-                            raw: None,
-                            value: key.id.sym.clone(),
-                        }
-                        .convert(state),
+                        value: str_lit(
+                            TextRange::default(),
+                            &safeish_name(state, key.id.sym.as_str()),
+                        ),
                     }));
                     body_stmts.push(py::Stmt::Assign(py::StmtAssign {
                         range: span.convert(state),
@@ -2993,11 +2995,7 @@ impl Convert for js::PropName {
                 optional: _,
             }) => py::Expr::StringLiteral(py::ExprStringLiteral {
                 range: span.convert(state),
-                value: py::StringLiteralValue::single(py::StringLiteral {
-                    range: span.convert(state),
-                    value: sym.as_str().into(),
-                    flags: py::StringLiteralFlags::default(),
-                }),
+                value: str_lit(span.convert(state), &safeish_name(state, sym.as_str())),
             })
             .into(),
             Self::Computed(js::ComputedPropName { span: _, expr }) => (*expr).convert(state),
@@ -3024,11 +3022,7 @@ impl Convert for js::Str {
             value,
             raw: _,
         } = self;
-        py::StringLiteralValue::single(py::StringLiteral {
-            range: span.convert(state),
-            value: value.as_str().into(),
-            flags: py::StringLiteralFlags::default(),
-        })
+        str_lit(span.convert(state), value.as_str())
     }
 }
 
@@ -5297,11 +5291,7 @@ impl Convert for js::LabeledStmt {
                 range: span.convert(state),
                 value: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
                     range: TextRange::default(),
-                    value: py::StringLiteralValue::single(py::StringLiteral {
-                        range: TextRange::default(),
-                        value: format!("label {label}").into(),
-                        flags: Default::default(),
-                    }),
+                    value: str_lit(TextRange::default(), &format!("label {label}")),
                 })),
             }),
         );
@@ -5395,11 +5385,7 @@ impl Convert for js::ContinueStmt {
                 range: span.convert(state),
                 value: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
                     range: TextRange::default(),
-                    value: py::StringLiteralValue::single(py::StringLiteral {
-                        range: TextRange::default(),
-                        value: format!("continue label: {label}").into(),
-                        flags: Default::default(),
-                    }),
+                    value: str_lit(TextRange::default(), &format!("continue label {label}")),
                 })),
             }));
         }
@@ -5420,11 +5406,7 @@ impl Convert for js::BreakStmt {
                 range: span.convert(state),
                 value: Box::new(py::Expr::StringLiteral(py::ExprStringLiteral {
                     range: TextRange::default(),
-                    value: py::StringLiteralValue::single(py::StringLiteral {
-                        range: TextRange::default(),
-                        value: format!("break label: {label}").into(),
-                        flags: Default::default(),
-                    }),
+                    value: str_lit(TextRange::default(), &format!("break label {label}")),
                 })),
             }));
         }
@@ -5669,7 +5651,6 @@ impl Convert for js::SwitchStmt {
             mut cases,
         } = self;
         cases.sort_by_key(|x| x.test.is_none());
-        let mut cases = cases.into_iter();
         let tmp = state.gen_name();
         let var = py::Expr::Name(py::ExprName {
             ctx: py::ExprContext::Load,
@@ -5685,60 +5666,65 @@ impl Convert for js::SwitchStmt {
             targets: vec![var.clone()],
             value: Box::new(discriminant),
         }));
-        let Some(case) = cases.next() else {
-            return stmts;
-        };
-        let js::SwitchCase {
-            span: span2,
-            test,
-            cons,
-        } = case;
-        let cons = cons.into_iter().flat_map(|stmt| {
-            if stmt.is_break_stmt() {
-                vec![]
-            } else {
-                stmt.convert(state)
+        let mut fallthrough = vec![];
+        let mut cases = cases.into_iter().flat_map(|case| {
+            let js::SwitchCase { span, test, cons } = case;
+            let test = test.convert(state).map(|x| x.unwrap_into(&mut stmts));
+            if cons.is_empty() {
+                fallthrough.extend(test);
+                return None;
             }
-        });
-        let Some(test) = test else {
-            stmts.extend(cons);
-            return stmts;
-        };
-        let test = test.convert(state).unwrap_into(&mut stmts);
-        let ret = py::Stmt::If(py::StmtIf {
-            range: span.convert(state),
-            test: Box::new(py::Expr::Compare(py::ExprCompare {
-                range: span2.convert(state),
-                ops: Box::new([py::CmpOp::Eq]),
-                left: Box::new(var.clone()),
-                comparators: Box::new([test]),
-            })),
-            body: safe_block(cons.collect()),
-            elif_else_clauses: cases
-                .map(|case| {
-                    let js::SwitchCase { span, test, cons } = case;
-                    let test = test.convert(state).map(|x| x.unwrap_into(&mut stmts));
-                    let cons = cons.into_iter().flat_map(|stmt| {
-                        if stmt.is_break_stmt() {
-                            vec![]
-                        } else {
-                            stmt.convert(state)
-                        }
-                    });
-                    py::ElifElseClause {
-                        range: span.convert(state),
-                        test: test.map(|test| {
+            let cons: Vec<_> = cons
+                .into_iter()
+                .flat_map(|stmt| {
+                    if stmt.is_break_stmt() {
+                        vec![]
+                    } else {
+                        stmt.convert(state)
+                    }
+                })
+                .collect();
+            let test = test.map(|test| {
+                fallthrough.push(test);
+                py::Expr::BoolOp(py::ExprBoolOp {
+                    range: span.convert(state),
+                    op: py::BoolOp::Or,
+                    values: fallthrough
+                        .drain(..)
+                        .map(|test| {
                             py::Expr::Compare(py::ExprCompare {
-                                range: span2.convert(state),
+                                range: test.range(),
                                 ops: Box::new([py::CmpOp::Eq]),
                                 left: Box::new(var.clone()),
                                 comparators: Box::new([test]),
                             })
-                        }),
-                        body: safe_block(cons.collect()),
-                    }
+                        })
+                        .collect(),
                 })
-                .collect(),
+            });
+            Some(py::ElifElseClause {
+                range: span.convert(state),
+                test,
+                body: safe_block(cons),
+            })
+        });
+        let Some(case) = cases.next() else {
+            return stmts;
+        };
+        let py::ElifElseClause {
+            range: _,
+            test,
+            body,
+        } = case;
+        let Some(test) = test else {
+            stmts.extend(body);
+            return stmts;
+        };
+        let ret = py::Stmt::If(py::StmtIf {
+            range: span.convert(state),
+            test: Box::new(test),
+            body,
+            elif_else_clauses: cases.collect(),
         });
         stmts.push(ret);
         stmts
