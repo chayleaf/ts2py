@@ -32,8 +32,8 @@ impl Convert for swc_common::Span {
     type Py = TextRange;
     fn convert(self, _state: &State) -> Self::Py {
         TextRange::new(
-            TextSize::new(self.lo().to_usize() as u32),
-            TextSize::new(self.hi().to_usize() as u32),
+            TextSize::new(self.lo().to_usize().try_into().unwrap()),
+            TextSize::new(self.hi().to_usize().try_into().unwrap()),
         )
     }
 }
@@ -125,7 +125,7 @@ fn safe_name(state: &State, s: &str) -> String {
         | "in" | "raise" | "True" | "class" | "finally" | "is" | "return" | "and" | "continue"
         | "for" | "lambda" | "try" | "as" | "def" | "from" | "nonlocal" | "while" | "assert"
         | "del" | "global" | "not" | "with" | "async" | "elif" | "if" | "or" | "yield" => {
-            s.push('_')
+            s.push('_');
         }
         _ => {}
     }
@@ -308,10 +308,10 @@ fn safe_params(params: py::Parameters) -> py::Parameters {
             for arg in &mut args {
                 if arg.default.is_some() {
                     continue;
-                } else {
-                    match arg.parameter.annotation.as_deref() {
-                        Some(py::Expr::Subscript(py::ExprSubscript { value, .. }))
-                            if matches!(&**value, py::Expr::Attribute(py::ExprAttribute {
+                }
+                match arg.parameter.annotation.as_deref() {
+                    Some(py::Expr::Subscript(py::ExprSubscript { value, .. }))
+                        if matches!(&**value, py::Expr::Attribute(py::ExprAttribute {
                             attr,
                             value,
                             ..
@@ -319,14 +319,12 @@ fn safe_params(params: py::Parameters) -> py::Parameters {
                             id,
                             ..
                         }) if id == "typing")) =>
-                        {
-                            arg.default =
-                                Some(Box::new(py::Expr::NoneLiteral(py::ExprNoneLiteral {
-                                    range: TextRange::default(),
-                                })));
-                        }
-                        _ => break,
+                    {
+                        arg.default = Some(Box::new(py::Expr::NoneLiteral(py::ExprNoneLiteral {
+                            range: TextRange::default(),
+                        })));
                     }
+                    _ => break,
                 }
             }
             args.reverse();
@@ -370,7 +368,7 @@ impl Convert for js::Module {
 }
 
 fn convert_import_path(state: &State, src: &str) -> String {
-    let mut path = state.script_path.to_owned();
+    let mut path = state.script_path.clone();
     path.pop();
     let src = src
         .strip_suffix(".ts")
@@ -388,7 +386,7 @@ fn convert_import_path(state: &State, src: &str) -> String {
     if path.ends_with("index") {
         path.pop();
     }
-    for comp in path.iter() {
+    for comp in &path {
         path2.push(comp);
         let comp2 = safe_name(state, comp.to_str().unwrap());
         ret.push_str(&comp2);
@@ -662,8 +660,8 @@ impl Convert for js::ExportDefaultDecl {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         let Self { span, decl } = self;
-        let mut stmts = decl.convert(state);
-        stmts.push(py::Stmt::Assign(py::StmtAssign {
+        let WithStmts { expr, mut stmts } = decl.convert(state);
+        let stmt = py::Stmt::Assign(py::StmtAssign {
             range: span.convert(state),
             targets: vec![py::Expr::Name(py::ExprName {
                 range: TextRange::default(),
@@ -671,7 +669,7 @@ impl Convert for js::ExportDefaultDecl {
                 ctx: py::ExprContext::Store,
             })],
             value: Box::new({
-                let id = match stmts.last().unwrap() {
+                let id = match &expr {
                     py::Stmt::FunctionDef(x) => x.name.clone(),
                     py::Stmt::ClassDef(x) => x.name.clone(),
                     py::Stmt::Assign(x) => {
@@ -681,28 +679,34 @@ impl Convert for js::ExportDefaultDecl {
                     }
                     x => todo!("{x:?}"),
                 };
+                stmts.push(expr);
+                if id.id == "default" {
+                    return stmts;
+                }
                 py::Expr::Name(py::ExprName {
                     range: id.range,
                     id: id.id,
                     ctx: py::ExprContext::Load,
                 })
             }),
-        }));
+        });
+        stmts.push(stmt);
         stmts
     }
 }
 
 impl Convert for js::DefaultDecl {
-    type Py = Vec<py::Stmt>;
+    type Py = WithStmts<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         match self {
-            Self::Fn(x) => {
-                let WithStmts { expr, mut stmts } = x.convert(state);
-                stmts.push(py::Stmt::FunctionDef(expr));
-                stmts
-            }
+            Self::Fn(x) => x.convert(state).map1(py::Stmt::FunctionDef),
             Self::TsInterfaceDecl(x) => (*x).convert(state),
-            x => todo!("{x:?}"),
+            Self::Class(x) => convert_class(
+                state,
+                Some(js::Ident::new("default".into(), Default::default())),
+                *x.class,
+            )
+            .map1(py::Stmt::ClassDef),
         }
     }
 }
@@ -711,17 +715,20 @@ impl Convert for js::ExportDefaultExpr {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         let Self { span, expr } = self;
-        let WithStmts { expr, mut stmts } = (*expr).convert(state);
-        stmts.push(py::Stmt::Assign(py::StmtAssign {
-            range: span.convert(state),
-            targets: vec![py::Expr::Name(py::ExprName {
-                range: TextRange::default(),
-                id: "default".to_owned(),
-                ctx: py::ExprContext::Store,
-            })],
-            value: Box::new(expr),
-        }));
-        stmts
+        (*expr)
+            .convert(state)
+            .map1(|expr| {
+                py::Stmt::Assign(py::StmtAssign {
+                    range: span.convert(state),
+                    targets: vec![py::Expr::Name(py::ExprName {
+                        range: TextRange::default(),
+                        id: "default".to_owned(),
+                        ctx: py::ExprContext::Store,
+                    })],
+                    value: Box::new(expr),
+                })
+            })
+            .flatten()
     }
 }
 
@@ -784,8 +791,9 @@ impl Convert for js::NamedExport {
                     names: vec![py::Alias {
                         range: TextRange::default(),
                         asname: exported.is_some().then(|| orig.clone().convert(state)),
-                        name: exported
-                            .map(|x| {
+                        name: exported.map_or_else(
+                            || orig.convert(state),
+                            |x| {
                                 (match x {
                                     js::ModuleExportName::Str(js::Str {
                                         span,
@@ -799,8 +807,8 @@ impl Convert for js::NamedExport {
                                     js::ModuleExportName::Ident(x) => x,
                                 })
                                 .convert(state)
-                            })
-                            .unwrap_or_else(|| orig.convert(state)),
+                            },
+                        ),
                     }],
                     level: 0,
                 }),
@@ -840,7 +848,7 @@ impl Convert for js::ModuleExportName {
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::Ident(x) => x.convert(state),
-            x => todo!("{x:?}"),
+            Self::Str(x) => todo!("{x:?}"),
         }
     }
 }
@@ -916,8 +924,43 @@ impl Convert for js::ModuleItem {
                 js::ModuleDecl::ExportNamed(decl) => decl.convert(state),
                 js::ModuleDecl::ExportDefaultExpr(decl) => decl.convert(state),
                 js::ModuleDecl::ExportDefaultDecl(decl) => decl.convert(state),
-                _ => todo!("{m:?}"),
+                js::ModuleDecl::TsImportEquals(decl) => (*decl).convert(state),
+                x => todo!("{x:?}"),
             },
+        }
+    }
+}
+
+impl Convert for js::TsImportEqualsDecl {
+    type Py = Vec<py::Stmt>;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self {
+            span,
+            is_export: _,
+            is_type_only: _,
+            id,
+            module_ref,
+        } = self;
+        let id = id.convert(state);
+        let mod_ref = module_ref.convert(state);
+        vec![py::Stmt::Assign(py::StmtAssign {
+            range: span.convert(state),
+            targets: vec![py::Expr::Name(py::ExprName {
+                range: id.range,
+                id: id.id,
+                ctx: py::ExprContext::Store,
+            })],
+            value: Box::new(mod_ref),
+        })]
+    }
+}
+
+impl Convert for js::TsModuleRef {
+    type Py = py::Expr;
+    fn convert(self, state: &State) -> Self::Py {
+        match self {
+            Self::TsEntityName(x) => x.convert(state),
+            Self::TsExternalModuleRef(x) => todo!("{x:?}"),
         }
     }
 }
@@ -944,7 +987,10 @@ impl<T> WithStmts<T> {
         }
     }
     fn unwrap_into(self, stmts: &mut Vec<py::Stmt>) -> T {
-        stmts.extend(self.stmts);
+        self.unwrap_with(|x| stmts.extend(x))
+    }
+    fn unwrap_with(self, func: impl FnOnce(Vec<py::Stmt>)) -> T {
+        func(self.stmts);
         self.expr
     }
 }
@@ -954,6 +1000,20 @@ impl<T> From<T> for WithStmts<T> {
             expr: value,
             stmts: Vec::new(),
         }
+    }
+}
+impl<T: IntoIterator<Item = py::Stmt>> WithStmts<T> {
+    fn flatten1(self) -> Vec<py::Stmt> {
+        let Self { expr, mut stmts } = self;
+        stmts.extend(expr.into_iter());
+        stmts
+    }
+}
+impl WithStmts<py::Stmt> {
+    fn flatten(self) -> Vec<py::Stmt> {
+        let Self { expr, mut stmts } = self;
+        stmts.push(expr);
+        stmts
     }
 }
 #[derive(Copy, Clone, Default)]
@@ -1034,7 +1094,6 @@ impl Convert for js::ObjectPat {
         let id = state.gen_ident();
         let mut stmts = vec![];
         let mut body_stmts = vec![];
-        let mut keys = Vec::new();
         for prop in props {
             match prop {
                 js::ObjectPatProp::Assign(js::AssignPatProp {
@@ -1042,19 +1101,12 @@ impl Convert for js::ObjectPat {
                     key,
                     value: _,
                 }) => {
-                    keys.push(py::Expr::StringLiteral(py::ExprStringLiteral {
-                        range: TextRange::default(),
-                        value: str_lit(
-                            TextRange::default(),
-                            &safeish_name(state, key.id.sym.as_str()),
-                        ),
-                    }));
                     body_stmts.push(py::Stmt::Assign(py::StmtAssign {
                         range: span.convert(state),
                         targets: vec![py::Expr::Name(py::ExprName {
                             range: TextRange::default(),
                             id: key.id.clone().convert(state).id,
-                            ctx: py::ExprContext::Load,
+                            ctx: py::ExprContext::Store,
                         })],
                         value: Box::new(py::Expr::Attribute(py::ExprAttribute {
                             range: TextRange::default(),
@@ -1070,7 +1122,6 @@ impl Convert for js::ObjectPat {
                 }
                 js::ObjectPatProp::KeyValue(js::KeyValuePatProp { key, value }) => {
                     let key = key.convert(state).unwrap_into(&mut stmts);
-                    keys.push(key.clone());
                     // assign key to value
                     let PatPy {
                         id: val,
@@ -1375,7 +1426,7 @@ impl Convert for js::Pat {
                     is_rest: false,
                 }
             }),
-            x => todo!("{x:?}"),
+            Self::Invalid(x) => todo!("{x:?}"),
         }
     }
 }
@@ -1632,7 +1683,7 @@ impl Convert for js::Regex {
             })),
             arguments: py::Arguments {
                 range: TextRange::default(),
-                args: [py::Expr::StringLiteral(py::ExprStringLiteral {
+                args: std::iter::once(py::Expr::StringLiteral(py::ExprStringLiteral {
                     range: TextRange::default(),
                     value: py::StringLiteralValue::single(py::StringLiteral {
                         range: TextRange::default(),
@@ -1641,29 +1692,25 @@ impl Convert for js::Regex {
                             py::str_prefix::StringLiteralPrefix::Raw { uppercase: false },
                         ),
                     }),
-                })]
-                .into_iter()
+                }))
                 .chain((!flags.is_empty()).then(|| {
-                    let flags: Vec<py::Expr> = flags
-                        .chars()
-                        .map(|c| {
-                            py::Expr::Attribute(py::ExprAttribute {
-                                range: span.convert(state),
-                                value: Box::new(state.import("re")),
-                                attr: py::Identifier::new(
-                                    match c {
-                                        'i' => 'I',
-                                        'g' => 'G',
-                                        'u' => 'U',
-                                        x => todo!("{x:?}"),
-                                    },
-                                    TextRange::default(),
-                                ),
-                                ctx: py::ExprContext::Load,
-                            })
+                    let mut flags = flags.chars().map(|c| {
+                        py::Expr::Attribute(py::ExprAttribute {
+                            range: span.convert(state),
+                            value: Box::new(state.import("re")),
+                            attr: py::Identifier::new(
+                                match c {
+                                    'i' => 'I',
+                                    'g' => 'G',
+                                    'u' => 'U',
+                                    'm' => 'M',
+                                    x => todo!("{x:?}"),
+                                },
+                                TextRange::default(),
+                            ),
+                            ctx: py::ExprContext::Load,
                         })
-                        .collect();
-                    let mut flags = flags.into_iter();
+                    });
                     let flag = flags.next().unwrap();
                     flags.fold(flag, |exp, flag| {
                         py::Expr::BinOp(py::ExprBinOp {
@@ -1771,7 +1818,7 @@ fn convert_func(
         return_type,
         type_params,
     } = function;
-    assert!(!is_generator);
+    assert!(!is_generator || return_type.is_none());
     let mut body_stmts = vec![];
     let mut ret_stmts = vec![];
     let returns = return_type.map(|x| {
@@ -1795,7 +1842,7 @@ fn convert_func(
                 args: params
                     .convert(state)
                     .into_iter()
-                    .flat_map(|x| {
+                    .filter_map(|x| {
                         let Param {
                             param,
                             body_stmts: b,
@@ -1864,14 +1911,14 @@ impl Convert for js::ArrowExpr {
             is_generator,
             return_type,
         } = self;
-        assert!(!is_generator);
+        assert!(!is_generator || return_type.is_none());
         let mut body_stmts = vec![];
         let mut stmts = vec![];
         let mut vararg = None;
         let args = params
             .convert(state)
             .into_iter()
-            .flat_map(|x| {
+            .filter_map(|x| {
                 let PatPy {
                     id,
                     type_ann,
@@ -2241,11 +2288,11 @@ impl Convert for js::Expr {
             }) => resolve_name(state, span, ctx, sym.as_str()).into(),
             Self::Lit(lit) => lit.convert2(state, ctx).into(),
             Self::Array(lit) => lit.convert2(state, ctx).map1(py::Expr::List),
-            Self::Fn(expr) => {
-                let WithStmts { expr, mut stmts } = expr.convert2(state, ctx);
-                stmts.push(py::Stmt::FunctionDef(expr));
-                stmts.into()
-            }
+            Self::Fn(expr) => expr
+                .convert2(state, ctx)
+                .map1(py::Stmt::FunctionDef)
+                .flatten()
+                .into(),
             Self::New(expr) => expr.convert2(state, ctx).map1(py::Expr::Call),
             Self::Arrow(expr) => expr.convert2(state, ctx),
             Self::Await(expr) => expr.convert2(state, ctx).map1(py::Expr::Await),
@@ -2269,7 +2316,158 @@ impl Convert for js::Expr {
             Self::TsTypeAssertion(expr) => expr.convert2(state, ctx),
             Self::Seq(expr) => expr.convert2(state, ctx),
             Self::TsInstantiation(expr) => expr.convert2(state, ctx),
+            Self::Yield(expr) => expr.convert2(state, ctx),
+            Self::Class(expr) => expr.convert2(state, ctx),
             x => todo!("{x:?}"),
+        }
+    }
+}
+
+impl Convert for js::ClassExpr {
+    type Py = HopefullyExpr;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self { ident, class } = self;
+        convert_class(state, ident, *class).map(|expr, stmts| {
+            let name = expr.name.clone();
+            stmts.push(py::Stmt::ClassDef(expr));
+            py::Expr::Name(py::ExprName {
+                range: name.range,
+                id: name.id,
+                ctx: py::ExprContext::Load,
+            })
+        })
+    }
+}
+
+fn convert_class(
+    state: &State,
+    ident: Option<js::Ident>,
+    class: js::Class,
+) -> WithStmts<py::StmtClassDef> {
+    let js::Class {
+        span,
+        decorators,
+        body,
+        super_class,
+        is_abstract: _,
+        type_params,
+        super_type_params,
+        implements,
+    } = class;
+    let mut stmts = vec![];
+    let (body, index, func) = convert_class_members(state, body).unwrap_into(&mut stmts);
+    assert!(func.is_none());
+    let ret = py::StmtClassDef {
+        range: span.convert(state),
+        decorator_list: decorators
+            .convert(state)
+            .into_iter()
+            .map(|x| py::Decorator {
+                range: x.range(),
+                expression: x,
+            })
+            .collect(),
+        arguments: Some(Box::new(py::Arguments {
+            range: TextRange::default(),
+            keywords: Box::new([]),
+            args: {
+                let mut args = super_class
+                    .map(|x| {
+                        vec![{
+                            let x = (*x).convert(state).unwrap_into(&mut stmts);
+                            if let Some(super_type_params) = super_type_params {
+                                let super_type_params =
+                                    (*super_type_params).convert(state).unwrap_into(&mut stmts);
+                                py::Expr::Subscript(py::ExprSubscript {
+                                    range: span.convert(state),
+                                    ctx: py::ExprContext::Load,
+                                    value: Box::new(x),
+                                    slice: Box::new(if super_type_params.len() == 1 {
+                                        super_type_params.into_iter().next().unwrap()
+                                    } else {
+                                        py::Expr::Tuple(py::ExprTuple {
+                                            range: span.convert(state),
+                                            ctx: py::ExprContext::Load,
+                                            parenthesized: false,
+                                            elts: super_type_params,
+                                        })
+                                    }),
+                                })
+                            } else {
+                                x
+                            }
+                        }]
+                    })
+                    .unwrap_or_default();
+                args.extend(if let Some((k, v)) = index {
+                    vec![py::Expr::Subscript(py::ExprSubscript {
+                        range: span.convert(state),
+                        value: Box::new(py::Expr::Name(py::ExprName {
+                            range: TextRange::default(),
+                            id: "dict".to_owned(),
+                            ctx: py::ExprContext::Load,
+                        })),
+                        slice: Box::new(py::Expr::Tuple(py::ExprTuple {
+                            range: TextRange::default(),
+                            parenthesized: false,
+                            ctx: py::ExprContext::Load,
+                            elts: vec![k, v],
+                        })),
+                        ctx: py::ExprContext::Load,
+                    })]
+                } else {
+                    vec![]
+                });
+                args.extend(
+                    implements
+                        .into_iter()
+                        .map(|x| x.convert(state).unwrap_into(&mut stmts)),
+                );
+                args.into()
+            },
+        })),
+        type_params: type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
+        name: ident.map_or_else(|| state.gen_ident(), |x| x.convert(state)),
+        body: safe_block(body),
+    };
+    WithStmts { expr: ret, stmts }
+}
+
+impl Convert for js::TsTypeParamInstantiation {
+    type Py = WithStmts<Vec<py::Expr>>;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self { span: _, params } = self;
+        let mut stmts = vec![];
+        WithStmts {
+            expr: params
+                .into_iter()
+                .map(|x| (*x).convert(state).unwrap_into(&mut stmts))
+                .collect(),
+            stmts,
+        }
+    }
+}
+
+impl Convert for js::YieldExpr {
+    type Py = HopefullyExpr;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self {
+            span,
+            arg,
+            delegate,
+        } = self;
+        assert!(!delegate);
+        let mut stmts = Vec::new();
+        let arg = arg
+            .map(|x| *x)
+            .convert(state)
+            .map(|x| Box::new(x.unwrap_into(&mut stmts)));
+        WithStmts {
+            expr: py::Expr::Yield(py::ExprYield {
+                range: span.convert(state),
+                value: arg,
+            }),
+            stmts,
         }
     }
 }
@@ -2727,6 +2925,7 @@ impl Convert for js::AssignExpr {
             js::AssignOp::Assign => {
                 if stmts2.len() == 1
                     && expr.is_name_expr()
+                    && target.is_name_expr()
                     && matches!(stmts2[0], py::Stmt::ClassDef(_) | py::Stmt::FunctionDef(_))
                 {
                     let py::ExprName { range, id, ctx: _ } = target.clone().name_expr().unwrap();
@@ -2879,7 +3078,7 @@ impl Convert for js::AssignTarget {
                         })
                     })
                 }),
-                x => todo!("{x:?}"),
+                js::AssignTargetPat::Invalid(x) => todo!("{x:?}"),
             },
         }
     }
@@ -3009,7 +3208,7 @@ impl Convert for js::PropName {
                 value: x.convert(state),
             })
             .into(),
-            x => todo!("{x:?}"),
+            Self::BigInt(x) => todo!("{x:?}"),
         }
     }
 }
@@ -3048,6 +3247,26 @@ impl Convert for js::PropOrSpread {
                             id: safe_name(state, id.sym.as_str()),
                             ctx: py::ExprContext::Load,
                         }),
+                    },
+                    js::Prop::Getter(js::GetterProp {
+                        span,
+                        type_ann,
+                        key,
+                        body,
+                    }) => py::DictItem {
+                        key: Some(key.convert(state).unwrap_into(&mut stmts)),
+                        value: {
+                            let func = js::ArrowExpr {
+                                params: vec![],
+                                body: Box::new(js::BlockStmtOrExpr::BlockStmt(body.unwrap())),
+                                span,
+                                is_async: false,
+                                is_generator: false,
+                                return_type: type_ann,
+                                type_params: None,
+                            };
+                            func.convert(state).unwrap_into(&mut stmts)
+                        },
                     },
                     x => todo!("{x:?}"),
                 },
@@ -3198,7 +3417,7 @@ impl Convert for js::TsTypeQueryExpr {
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::TsEntityName(x) => x.convert(state),
-            x => todo!("{x:?}"),
+            Self::Import(x) => x.convert(state),
         }
     }
 }
@@ -3417,6 +3636,27 @@ impl Convert for js::TsInferType {
         let Self {
             span,
             type_param: _,
+        } = self;
+        py::Expr::Attribute(py::ExprAttribute {
+            range: span.convert(state),
+            value: Box::new(state.import("typing")),
+            attr: py::Identifier {
+                range: TextRange::default(),
+                id: "Any".to_owned(),
+            },
+            ctx: py::ExprContext::Load,
+        })
+    }
+}
+
+impl Convert for js::TsImportType {
+    type Py = py::Expr;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self {
+            span,
+            arg: _,
+            qualifier: _,
+            type_args: _,
         } = self;
         py::Expr::Attribute(py::ExprAttribute {
             range: span.convert(state),
@@ -3657,7 +3897,7 @@ impl Convert for js::TsKeywordType {
                 },
                 ctx: py::ExprContext::Load,
             }),
-            x => todo!("{x:?}"),
+            x @ js::TsKeywordTypeKind::TsIntrinsicKeyword => todo!("{x:?}"),
         }
     }
 }
@@ -3840,9 +4080,7 @@ impl Convert for js::ExprStmt {
     type Py = Vec<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         let Self { span: _, expr } = self;
-        let WithStmts { expr, mut stmts } = (*expr).convert(state);
-        stmts.extend(expr_stmt(expr));
-        stmts
+        (*expr).convert(state).map1(expr_stmt).flatten1()
     }
 }
 
@@ -3854,10 +4092,10 @@ impl Convert for js::Decl {
             Self::TsTypeAlias(d) => (*d).convert(state),
             Self::Class(d) => d.convert(state),
             Self::Fn(d) => d.convert(state),
-            Self::TsInterface(d) => (*d).convert(state),
+            Self::TsInterface(d) => (*d).convert(state).flatten(),
             Self::TsEnum(d) => (*d).convert(state),
             Self::TsModule(d) => (*d).convert(state),
-            d => todo!("{d:?}"),
+            Self::Using(d) => todo!("{d:?}"),
         }
     }
 }
@@ -3892,7 +4130,7 @@ impl Convert for js::TsModuleName {
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::Ident(x) => x.convert(state),
-            x @ Self::Str(_) => todo!("{x:?}"),
+            Self::Str(x) => todo!("{x:?}"),
         }
     }
 }
@@ -3902,7 +4140,7 @@ impl Convert for js::TsNamespaceBody {
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::TsModuleBlock(x) => x.convert(state),
-            x => todo!("{x:?}"),
+            Self::TsNamespaceDecl(x) => todo!("{x:?}"),
         }
     }
 }
@@ -4012,7 +4250,7 @@ impl Convert for js::TsEnumMemberId {
 }
 
 impl Convert for js::TsInterfaceDecl {
-    type Py = Vec<py::Stmt>;
+    type Py = WithStmts<py::Stmt>;
     fn convert(self, state: &State) -> Self::Py {
         let Self {
             span,
@@ -4027,35 +4265,34 @@ impl Convert for js::TsInterfaceDecl {
         if let Some((k, v)) = index {
             assert!(func.is_none());
             assert!(body.is_empty());
-            stmts.push(index_assign(
-                id.convert(state).id,
-                k,
-                v,
-                span.convert(state),
-            ));
-            return stmts;
+            return WithStmts {
+                expr: index_assign(id.convert(state).id, k, v, span.convert(state)),
+                stmts,
+            };
         }
-        let ret = py::StmtClassDef {
-            range: span.convert(state),
-            decorator_list: vec![],
-            arguments: Some(Box::new(py::Arguments {
-                range: TextRange::default(),
-                keywords: Box::new([]),
-                args: func
-                    .into_iter()
-                    .chain(
-                        extends
-                            .into_iter()
-                            .map(|x| x.convert(state).unwrap_into(&mut stmts)),
-                    )
-                    .collect(),
-            })),
-            type_params: type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
-            name: id.convert(state),
-            body: safe_block(body),
-        };
-        stmts.push(py::Stmt::ClassDef(ret));
-        stmts
+        WithStmts {
+            expr: py::Stmt::ClassDef(py::StmtClassDef {
+                range: span.convert(state),
+                decorator_list: vec![],
+                arguments: Some(Box::new(py::Arguments {
+                    range: TextRange::default(),
+                    keywords: Box::new([]),
+                    args: func
+                        .into_iter()
+                        .chain(
+                            extends
+                                .into_iter()
+                                .map(|x| x.convert(state).unwrap_into(&mut stmts)),
+                        )
+                        .collect(),
+                })),
+                type_params: type_params
+                    .map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
+                name: id.convert(state),
+                body: safe_block(body),
+            }),
+            stmts,
+        }
     }
 }
 
@@ -4075,7 +4312,7 @@ fn convert_class_body(
         expr: (
             body.convert(state)
                 .into_iter()
-                .flat_map(|x| match x.unwrap_into(&mut stmts) {
+                .filter_map(|x| match x.unwrap_into(&mut stmts) {
                     ClassMember::None => None,
                     ClassMember::Member(x) => Some(x),
                     ClassMember::Index(a, b) => {
@@ -4111,7 +4348,7 @@ fn convert_class_members(
         expr: (
             body.convert(state)
                 .into_iter()
-                .flat_map(|x| match x.unwrap_into(&mut stmts) {
+                .filter_map(|x| match x.unwrap_into(&mut stmts) {
                     ClassMember::None => None,
                     ClassMember::Member(x) => Some(x),
                     ClassMember::Index(a, b) => {
@@ -4163,9 +4400,9 @@ impl Convert for js::FnDecl {
             declare: _,
             function,
         } = self;
-        let WithStmts { expr, mut stmts } = convert_func(state, Some(ident), *function);
-        stmts.push(py::Stmt::FunctionDef(expr));
-        stmts
+        convert_func(state, Some(ident), *function)
+            .map1(py::Stmt::FunctionDef)
+            .flatten()
     }
 }
 
@@ -4177,69 +4414,9 @@ impl Convert for js::ClassDecl {
             declare: _,
             class,
         } = self;
-        let js::Class {
-            span,
-            decorators,
-            body,
-            super_class,
-            is_abstract: _,
-            type_params,
-            super_type_params: _,
-            implements,
-        } = *class;
-        let mut stmts = vec![];
-        let (body, index, func) = convert_class_members(state, body).unwrap_into(&mut stmts);
-        assert!(func.is_none());
-        let ret = py::StmtClassDef {
-            range: span.convert(state),
-            decorator_list: decorators
-                .convert(state)
-                .into_iter()
-                .map(|x| py::Decorator {
-                    range: x.range(),
-                    expression: x,
-                })
-                .collect(),
-            arguments: Some(Box::new(py::Arguments {
-                range: TextRange::default(),
-                keywords: Box::new([]),
-                args: {
-                    let mut args = super_class
-                        .map(|x| vec![(*x).convert(state).unwrap_into(&mut stmts)])
-                        .unwrap_or_default();
-                    args.extend(if let Some((k, v)) = index {
-                        vec![py::Expr::Subscript(py::ExprSubscript {
-                            range: span.convert(state),
-                            value: Box::new(py::Expr::Name(py::ExprName {
-                                range: TextRange::default(),
-                                id: "dict".to_owned(),
-                                ctx: py::ExprContext::Load,
-                            })),
-                            slice: Box::new(py::Expr::Tuple(py::ExprTuple {
-                                range: TextRange::default(),
-                                parenthesized: false,
-                                ctx: py::ExprContext::Load,
-                                elts: vec![k, v],
-                            })),
-                            ctx: py::ExprContext::Load,
-                        })]
-                    } else {
-                        vec![]
-                    });
-                    args.extend(
-                        implements
-                            .into_iter()
-                            .map(|x| x.convert(state).unwrap_into(&mut stmts)),
-                    );
-                    args.into()
-                },
-            })),
-            type_params: type_params.map(|x| Box::new((*x).convert(state).unwrap_into(&mut stmts))),
-            name: ident.convert(state),
-            body: safe_block(body),
-        };
-        stmts.push(py::Stmt::ClassDef(ret));
-        stmts
+        convert_class(state, Some(ident), *class)
+            .map1(py::Stmt::ClassDef)
+            .flatten()
     }
 }
 
@@ -4298,7 +4475,7 @@ impl Convert for js::Constructor {
                             annotation: None,
                         },
                     })
-                    .chain(params.convert(state).into_iter().flat_map(|x| {
+                    .chain(params.convert(state).into_iter().filter_map(|x| {
                         let Param {
                             param,
                             body_stmts: stmts,
@@ -4715,12 +4892,28 @@ fn convert_type_lit(
     let js::TsTypeLit { span, members } = lit;
     let mut stmts = vec![];
     let (body, index, func) = convert_class_body(state, members).unwrap_into(&mut stmts);
-    assert!(func.is_none());
+    if let Some(func) = func {
+        assert!(index.is_none());
+        assert!(body.is_empty());
+
+        stmts.push(py::Stmt::Assign(py::StmtAssign {
+            range: span.convert(state),
+            targets: vec![py::Expr::Name(py::ExprName {
+                range: id
+                    .as_ref()
+                    .map(|x| x.span.convert(state))
+                    .unwrap_or_default(),
+                id: id.map_or_else(|| state.gen_name(), |x| x.convert(state).id),
+                ctx: py::ExprContext::Store,
+            })],
+            value: Box::new(func),
+        }));
+        return stmts;
+    }
     if let Some((k, v)) = index {
         assert!(body.is_empty());
         stmts.push(index_assign(
-            id.map(|x| x.convert(state).id)
-                .unwrap_or_else(|| state.gen_name()),
+            id.map_or_else(|| state.gen_name(), |x| x.convert(state).id),
             k,
             v,
             span.convert(state),
@@ -4772,19 +4965,20 @@ impl Convert for js::TsTypeAliasDecl {
             js::TsType::TsTypeLit(lit) => {
                 convert_type_lit(state, lit, Some(id), type_params.map(|x| *x))
             }
-            x => {
-                let WithStmts { expr, mut stmts } = x.convert(state);
-                stmts.push(py::Stmt::Assign(py::StmtAssign {
-                    range: expr.range(),
-                    targets: vec![py::Expr::Name(py::ExprName {
-                        range: id.span.convert(state),
-                        id: safe_name(state, id.sym.as_str()),
-                        ctx: py::ExprContext::Store,
-                    })],
-                    value: Box::new(expr),
-                }));
-                stmts
-            }
+            x => x
+                .convert(state)
+                .map1(|expr| {
+                    py::Stmt::Assign(py::StmtAssign {
+                        range: expr.range(),
+                        targets: vec![py::Expr::Name(py::ExprName {
+                            range: id.span.convert(state),
+                            id: safe_name(state, id.sym.as_str()),
+                            ctx: py::ExprContext::Store,
+                        })],
+                        value: Box::new(expr),
+                    })
+                })
+                .flatten(),
         }
     }
 }
@@ -4803,7 +4997,81 @@ impl Convert for js::TsTypeElement {
                 .map1(ClassMember::Member),
             Self::TsIndexSignature(ty) => ty.convert(state),
             Self::TsCallSignatureDecl(ty) => ty.convert(state),
+            Self::TsConstructSignatureDecl(ty) => ty.convert(state),
             x => todo!("{x:?}"),
+        }
+    }
+}
+
+impl Convert for js::TsConstructSignatureDecl {
+    type Py = WithStmts<ClassMember>;
+    fn convert(self, state: &State) -> Self::Py {
+        let Self {
+            span,
+            params,
+            type_ann,
+            type_params: _,
+        } = self;
+        let mut stmts = vec![];
+        WithStmts {
+            expr: ClassMember::Callable(py::Expr::Subscript(py::ExprSubscript {
+                range: span.convert(state),
+                value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                    range: span.convert(state),
+                    value: Box::new(py::Expr::Attribute(py::ExprAttribute {
+                        range: span.convert(state),
+                        value: Box::new(state.import("collections")),
+                        attr: py::Identifier {
+                            range: TextRange::default(),
+                            id: "abc".to_owned(),
+                        },
+                        ctx: py::ExprContext::Load,
+                    })),
+                    attr: py::Identifier {
+                        range: TextRange::default(),
+                        id: "Callable".to_owned(),
+                    },
+                    ctx: py::ExprContext::Load,
+                })),
+                slice: Box::new(py::Expr::Tuple(py::ExprTuple {
+                    range: TextRange::default(),
+                    parenthesized: false,
+                    ctx: py::ExprContext::Load,
+                    elts: vec![
+                        py::Expr::List(py::ExprList {
+                            range: TextRange::default(),
+                            ctx: py::ExprContext::Load,
+                            elts: params
+                                .into_iter()
+                                .map(|x| match x.convert(state).unwrap_into(&mut stmts) {
+                                    PyParameter::Single(x) => x.parameter.annotation.map_or_else(
+                                        || {
+                                            py::Expr::Attribute(py::ExprAttribute {
+                                                range: span.convert(state),
+                                                value: Box::new(state.import("typing")),
+                                                attr: py::Identifier {
+                                                    range: TextRange::default(),
+                                                    id: "Any".to_owned(),
+                                                },
+                                                ctx: py::ExprContext::Load,
+                                            })
+                                        },
+                                        |x| *x,
+                                    ),
+                                    PyParameter::Rest(_) => {
+                                        py::Expr::EllipsisLiteral(py::ExprEllipsisLiteral {
+                                            range: TextRange::default(),
+                                        })
+                                    }
+                                })
+                                .collect(),
+                        }),
+                        (*type_ann.unwrap()).convert(state).unwrap_into(&mut stmts),
+                    ],
+                })),
+                ctx: py::ExprContext::Load,
+            })),
+            stmts,
         }
     }
 }
@@ -5433,8 +5701,7 @@ impl Convert for js::ForStmt {
         }
         let mut body = (*body).convert(state);
         if let Some(upd) = update {
-            let WithStmts { expr, stmts } = (*upd).convert(state);
-            body.extend(stmts);
+            let expr = (*upd).convert(state).unwrap_into(&mut body);
             body.extend(expr_stmt(expr));
         }
         let test = test.map_or_else(
@@ -5445,13 +5712,10 @@ impl Convert for js::ForStmt {
                 })
             },
             |test| {
-                let WithStmts {
-                    expr: test,
-                    stmts: test_stmts,
-                } = (*test).convert(state);
-                stmts.extend(test_stmts.clone());
-                body.extend(test_stmts);
-                test
+                (*test).convert(state).unwrap_with(|test_stmts| {
+                    stmts.extend(test_stmts.iter().cloned());
+                    body.extend(test_stmts);
+                })
             },
         );
         stmts.push(py::Stmt::While(py::StmtWhile {
@@ -5470,12 +5734,10 @@ impl Convert for js::DoWhileStmt {
         let Self { span, test, body } = self;
         let mut stmts = vec![];
         let mut body = (*body).convert(state);
-        let WithStmts {
-            expr: test,
-            stmts: test_stmts,
-        } = (*test).convert(state);
-        stmts.extend(test_stmts.clone());
-        body.extend(test_stmts);
+        let test = (*test).convert(state).unwrap_with(|test_stmts| {
+            stmts.extend(test_stmts.iter().cloned());
+            body.extend(test_stmts);
+        });
         body.push(py::Stmt::If(py::StmtIf {
             range: TextRange::default(),
             test: Box::new(test),
@@ -5503,12 +5765,10 @@ impl Convert for js::WhileStmt {
         let Self { span, test, body } = self;
         let mut stmts = vec![];
         let mut body = (*body).convert(state);
-        let WithStmts {
-            expr: test,
-            stmts: test_stmts,
-        } = (*test).convert(state);
-        stmts.extend(test_stmts.clone());
-        body.extend(test_stmts);
+        let test = (*test).convert(state).unwrap_with(|test_stmts| {
+            stmts.extend(test_stmts.iter().cloned());
+            body.extend(test_stmts);
+        });
         stmts.push(py::Stmt::While(py::StmtWhile {
             range: span.convert(state),
             test: Box::new(test),
@@ -5524,11 +5784,7 @@ impl Convert for js::VarDeclOrExpr {
     fn convert(self, state: &State) -> Self::Py {
         match self {
             Self::VarDecl(x) => (*x).convert(state),
-            Self::Expr(x) => {
-                let WithStmts { expr, mut stmts } = (*x).convert(state);
-                stmts.extend(expr_stmt(expr));
-                stmts
-            }
+            Self::Expr(x) => (*x).convert(state).map1(expr_stmt).flatten1(),
         }
     }
 }
@@ -5622,7 +5878,26 @@ impl Convert for js::ForHead {
                     body_stmts,
                 )
             }
-            x => todo!("{x:?}"),
+            Self::Pat(name) => {
+                let span = name.span();
+                let PatPy {
+                    id: name,
+                    type_ann: _,
+                    body_stmts,
+                    def_val: _,
+                    is_rest,
+                } = name.convert(state).expr;
+                assert!(!is_rest);
+                (
+                    py::Expr::Name(py::ExprName {
+                        range: span.convert(state),
+                        id: safe_name(state, &name.id),
+                        ctx: py::ExprContext::Store,
+                    }),
+                    body_stmts,
+                )
+            }
+            Self::UsingDecl(x) => todo!("{x:?}"),
         }
     }
 }
@@ -5667,7 +5942,7 @@ impl Convert for js::SwitchStmt {
             value: Box::new(discriminant),
         }));
         let mut fallthrough = vec![];
-        let mut cases = cases.into_iter().flat_map(|case| {
+        let mut cases = cases.into_iter().filter_map(|case| {
             let js::SwitchCase { span, test, cons } = case;
             let test = test.convert(state).map(|x| x.unwrap_into(&mut stmts));
             if cons.is_empty() {
@@ -5743,12 +6018,15 @@ impl Convert for js::ReturnStmt {
                 })]
             },
             |arg| {
-                let WithStmts { expr, mut stmts } = (*arg).convert(state);
-                stmts.push(py::Stmt::Return(py::StmtReturn {
-                    range: span.convert(state),
-                    value: Some(Box::new(expr)),
-                }));
-                stmts
+                (*arg)
+                    .convert(state)
+                    .map1(|expr| {
+                        py::Stmt::Return(py::StmtReturn {
+                            range: span.convert(state),
+                            value: Some(Box::new(expr)),
+                        })
+                    })
+                    .flatten()
             },
         )
     }
